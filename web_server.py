@@ -66,7 +66,31 @@ class RobotWebServer:
                     "tracking": self.robot.slam_tracking_state
                 },
                 "camera": self.camera.get_camera_info(),
+                "imu": self.robot.get_imu_data(),
+                "obstacles": self.robot.get_obstacle_info(),
+                "autonomous_mode": self.robot.autonomous_mode,
                 "timestamp": time.time()
+            })
+        
+        @self.app.route('/api/obstacles')
+        def get_obstacles():
+            """Get obstacle detection info"""
+            return jsonify(self.robot.get_obstacle_info())
+        
+        @self.app.route('/api/imu')
+        def get_imu():
+            """Get IMU data"""
+            return jsonify(self.robot.get_imu_data())
+        
+        @self.app.route('/api/autonomous', methods=['POST'])
+        def set_autonomous():
+            """Enable/disable autonomous mode"""
+            data = request.json
+            enable = data.get('enable', False)
+            self.robot.enable_autonomous_mode(enable)
+            return jsonify({
+                "success": True,
+                "autonomous_mode": self.robot.autonomous_mode
             })
         
         @self.app.route('/api/velocity', methods=['POST'])
@@ -126,6 +150,22 @@ class RobotWebServer:
                 mimetype='multipart/x-mixed-replace; boundary=frame'
             )
         
+        @self.app.route('/video/obstacles')
+        def video_obstacles():
+            """Stream with obstacle overlay"""
+            return Response(
+                self._generate_stream('obstacles'),
+                mimetype='multipart/x-mixed-replace; boundary=frame'
+            )
+        
+        @self.app.route('/video/depth')
+        def video_depth():
+            """Stream depth map"""
+            return Response(
+                self._generate_stream('depth'),
+                mimetype='multipart/x-mixed-replace; boundary=frame'
+            )
+        
         @self.app.route('/api/trajectory')
         def get_trajectory():
             """Get SLAM trajectory"""
@@ -150,6 +190,24 @@ class RobotWebServer:
                     left = self.robot.current_frame_left
                     right = self.robot.current_frame_right
                     frame = np.hstack([left, right])
+                elif mode == 'obstacles':
+                    # Draw obstacles on left frame
+                    frame = self.robot.current_frame_left.copy()
+                    if self.robot.obstacle_detector and self.robot.current_obstacles:
+                        frame = self.robot.obstacle_detector.visualize_obstacles(
+                            frame, 
+                            self.robot.current_obstacles,
+                            self.robot.current_depth_map
+                        )
+                elif mode == 'depth':
+                    # Show depth map
+                    if self.robot.current_depth_map is not None:
+                        depth_norm = cv2.normalize(self.robot.current_depth_map, None, 0, 255, cv2.NORM_MINMAX)
+                        frame = cv2.applyColorMap(depth_norm.astype(np.uint8), cv2.COLORMAP_JET)
+                    else:
+                        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                        cv2.putText(frame, "No depth data", (200, 240),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                 else:
                     continue
                 
@@ -179,14 +237,33 @@ class RobotWebServer:
             f"FPS: {self.robot.fps:.1f}"
         ]
         
+        # Add IMU data if available
+        if self.robot.imu:
+            status_text.append(f"IMU: P={self.robot.imu_pitch:.1f}° R={self.robot.imu_roll:.1f}°")
+        
+        # Add obstacle count
+        if self.robot.current_obstacles:
+            status_text.append(f"Obstacles: {len(self.robot.current_obstacles)}")
+        
+        # Add autonomous mode indicator
+        if self.robot.autonomous_mode:
+            status_text.append("AUTO MODE")
+        
         # Draw background
-        cv2.rectangle(overlay, (5, 5), (250, 80), (0, 0, 0), -1)
+        bg_height = 25 + len(status_text) * 20
+        cv2.rectangle(overlay, (5, 5), (300, bg_height), (0, 0, 0), -1)
         
         # Draw text
         y = 25
         for text in status_text:
+            color = (0, 255, 0)
+            if "AUTO MODE" in text:
+                color = (0, 255, 255)
+            elif "Obstacles" in text:
+                color = (0, 165, 255)
+            
             cv2.putText(overlay, text, (10, y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             y += 20
         
         # Blend

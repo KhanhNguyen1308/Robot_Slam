@@ -1,6 +1,6 @@
 """
 Main Robot Controller
-Integrates all subsystems: Camera, SLAM, Motor Control, Web Server
+Integrates all subsystems: Camera, SLAM, Motor Control, Web Server, IMU, Obstacle Detection
 """
 import numpy as np
 import cv2
@@ -15,6 +15,8 @@ from serial_controller import RP2040Controller, SafetyController
 from stereo_camera import StereoCamera
 from orbslam_interface import ORBSLAM3, SimpleVisualOdometry
 from web_server import RobotWebServer
+from imu_module import ADXL345, IMUFilter
+from obstacle_detection import ObstacleDetector, SimpleObstacleAvoidance
 
 # Setup logging
 logging.basicConfig(
@@ -38,6 +40,10 @@ class RobotSystem:
         self.camera = None
         self.slam = None
         self.web_server = None
+        self.imu = None
+        self.imu_filter = None
+        self.obstacle_detector = None
+        self.obstacle_avoidance = None
         
         # State
         self.running = False
@@ -49,6 +55,15 @@ class RobotSystem:
         self.current_frame_right = None
         self.current_timestamp = 0
         
+        # Depth and obstacles
+        self.current_depth_map = None
+        self.current_obstacles = []
+        
+        # IMU data
+        self.imu_pitch = 0.0
+        self.imu_roll = 0.0
+        self.collision_detected = False
+        
         # Trajectory
         self.trajectory = []
         
@@ -56,6 +71,9 @@ class RobotSystem:
         self.fps = 0
         self.frame_count = 0
         self.last_fps_time = time.time()
+        
+        # Control mode
+        self.autonomous_mode = False
         
         # Main processing thread
         self.main_thread = None
@@ -100,7 +118,51 @@ class RobotSystem:
             
             self.camera.start_capture()
             
-            # 3. Initialize ORB-SLAM3 (optional)
+            # 4. Initialize IMU (optional)
+            use_imu = self.config.get('use_imu', True)
+            
+            if use_imu:
+                logger.info("Initializing IMU ADXL345...")
+                self.imu = ADXL345(bus=1, g_range=2)
+                
+                if self.imu.connect():
+                    # Calibrate IMU
+                    logger.info("Calibrating IMU (keep robot still)...")
+                    time.sleep(1)
+                    self.imu.calibrate()
+                    
+                    # Start filtering
+                    self.imu_filter = IMUFilter(self.imu, alpha=0.98, update_rate=50)
+                    self.imu_filter.start()
+                    
+                    logger.info("✓ IMU initialized")
+                else:
+                    logger.warning("IMU not available - continuing without it")
+                    self.imu = None
+            
+            # 5. Initialize obstacle detection
+            logger.info("Initializing obstacle detection...")
+            
+            if self.camera.calibration_loaded:
+                # Get camera parameters
+                baseline = abs(self.camera.T[0])  # Baseline in meters
+                focal_length = self.camera.K1[0, 0]  # Focal length in pixels
+                
+                self.obstacle_detector = ObstacleDetector(
+                    camera_baseline=baseline,
+                    camera_focal_length=focal_length,
+                    min_distance=0.2,
+                    max_distance=3.0,
+                    danger_zone_distance=self.config.get('danger_zone_distance', 0.5)
+                )
+                
+                self.obstacle_avoidance = SimpleObstacleAvoidance(self.obstacle_detector)
+                
+                logger.info("✓ Obstacle detection initialized")
+            else:
+                logger.warning("Cannot initialize obstacle detection without calibration")
+            
+            # 6. Initialize ORB-SLAM3 (optional)
             use_orbslam = self.config.get('use_orbslam', True)
             
             if use_orbslam:
@@ -131,7 +193,7 @@ class RobotSystem:
                 logger.info("Using simple visual odometry")
                 self.slam = SimpleVisualOdometry()
             
-            # 4. Initialize web server
+            # 7. Initialize web server
             logger.info("Starting web server...")
             self.web_server = RobotWebServer(
                 robot_controller=self,
@@ -166,6 +228,9 @@ class RobotSystem:
         
         self.running = False
         
+        # Disable autonomous mode
+        self.autonomous_mode = False
+        
         # Stop motors
         if self.safety_controller:
             self.safety_controller.stop()
@@ -173,6 +238,12 @@ class RobotSystem:
         # Stop camera
         if self.camera:
             self.camera.close()
+        
+        # Stop IMU
+        if self.imu_filter:
+            self.imu_filter.stop()
+        if self.imu:
+            self.imu.close()
         
         # Stop SLAM
         if self.slam and hasattr(self.slam, 'stop'):
@@ -212,7 +283,40 @@ class RobotSystem:
                 # 2. Rectify frames
                 rect_left, rect_right = self.camera.rectify_frames(frame_left, frame_right)
                 
-                # 3. Run SLAM/Visual Odometry
+                # 3. Obstacle detection
+                if self.obstacle_detector:
+                    # Compute disparity and depth
+                    disparity = self.obstacle_detector.compute_disparity(rect_left, rect_right)
+                    depth_map = self.obstacle_detector.disparity_to_depth(disparity)
+                    self.current_depth_map = depth_map
+                    
+                    # Detect obstacles
+                    obstacles = self.obstacle_detector.detect_obstacles(depth_map, rect_left)
+                    self.current_obstacles = obstacles
+                    
+                    # Autonomous obstacle avoidance
+                    if self.autonomous_mode and self.obstacle_avoidance:
+                        linear, angular = self.obstacle_avoidance.compute_velocity(obstacles)
+                        self.set_velocity(linear, angular)
+                
+                # 4. Update IMU
+                if self.imu_filter:
+                    self.imu_pitch, self.imu_roll = self.imu_filter.get_orientation()
+                    
+                    # Check for collision
+                    if self.imu_filter.detect_collision(threshold=2.5):
+                        if not self.collision_detected:
+                            logger.warning("⚠ COLLISION DETECTED!")
+                            self.collision_detected = True
+                            self.emergency_stop()
+                    else:
+                        self.collision_detected = False
+                    
+                    # Check for excessive tilt
+                    if self.imu_filter.is_tilted(max_angle=20.0):
+                        logger.warning("⚠ Robot tilted beyond safe angle!")
+                
+                # 5. Run SLAM/Visual Odometry
                 if isinstance(self.slam, ORBSLAM3):
                     pose = self.slam.track_stereo(rect_left, rect_right, timestamp)
                 else:
@@ -227,14 +331,19 @@ class RobotSystem:
                 else:
                     self.slam_tracking_state = "LOST"
                 
-                # 4. Update FPS counter
+                # 6. Update FPS counter
                 self.frame_count += 1
                 current_time = time.time()
                 if current_time - self.last_fps_time >= 1.0:
                     self.fps = self.frame_count / (current_time - self.last_fps_time)
                     self.frame_count = 0
                     self.last_fps_time = current_time
-                    logger.debug(f"FPS: {self.fps:.1f}, Tracking: {self.slam_tracking_state}")
+                    
+                    # Log status
+                    logger.debug(f"FPS: {self.fps:.1f}, "
+                               f"SLAM: {self.slam_tracking_state}, "
+                               f"Obstacles: {len(self.current_obstacles)}, "
+                               f"IMU: P={self.imu_pitch:.1f}° R={self.imu_roll:.1f}°")
                 
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
@@ -265,6 +374,59 @@ class RobotSystem:
         if self.motor_controller:
             return self.motor_controller.stop()
         return False
+    
+    def enable_autonomous_mode(self, enable: bool = True):
+        """Enable/disable autonomous obstacle avoidance"""
+        self.autonomous_mode = enable
+        logger.info(f"Autonomous mode: {'ENABLED' if enable else 'DISABLED'}")
+    
+    def get_obstacle_info(self) -> dict:
+        """Get current obstacle information"""
+        if not self.obstacle_detector or not self.current_obstacles:
+            return {
+                "obstacles": [],
+                "danger_zones": {"left": "clear", "center": "clear", "right": "clear"},
+                "safe_direction": "forward"
+            }
+        
+        zones = self.obstacle_detector.get_danger_zones(self.current_obstacles)
+        direction, confidence = self.obstacle_detector.get_safe_direction(self.current_obstacles)
+        
+        obstacles_data = [{
+            "distance": obs.distance,
+            "angle": obs.angle,
+            "severity": obs.severity
+        } for obs in self.current_obstacles[:5]]  # Top 5 closest
+        
+        return {
+            "obstacles": obstacles_data,
+            "danger_zones": zones,
+            "safe_direction": direction,
+            "confidence": confidence
+        }
+    
+    def get_imu_data(self) -> dict:
+        """Get IMU sensor data"""
+        if not self.imu:
+            return {
+                "connected": False,
+                "pitch": 0.0,
+                "roll": 0.0,
+                "collision": False
+            }
+        
+        ax, ay, az = self.imu.read_accel()
+        
+        return {
+            "connected": True,
+            "pitch": self.imu_pitch,
+            "roll": self.imu_roll,
+            "accel_x": ax,
+            "accel_y": ay,
+            "accel_z": az,
+            "magnitude": self.imu.get_magnitude(),
+            "collision": self.collision_detected
+        }
     
     def get_trajectory(self) -> list:
         """Get SLAM trajectory"""
@@ -311,6 +473,14 @@ def main():
         'camera_height': 720,
         'camera_fps': 30,
         'calibration_file': 'calibration.npz',
+        
+        # IMU
+        'use_imu': True,
+        'imu_bus': 1,
+        'imu_address': 0x53,
+        
+        # Obstacle Detection
+        'danger_zone_distance': 0.5,  # meters
         
         # ORB-SLAM3
         'use_orbslam': True,

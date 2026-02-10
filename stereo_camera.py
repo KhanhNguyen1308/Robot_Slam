@@ -111,12 +111,17 @@ class StereoCamera:
     def open(self) -> bool:
         """Open camera devices"""
         try:
+            import os
+            
             # Open left camera
             self.cap_left = cv2.VideoCapture(self.left_id)
             self.cap_left.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self.cap_left.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             self.cap_left.set(cv2.CAP_PROP_FPS, self.fps)
             self.cap_left.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            
+            # Fix power line frequency for left camera (50Hz for Vietnam)
+            os.system(f"v4l2-ctl -d /dev/video{self.left_id} --set-ctrl=power_line_frequency=1")
             
             # Open right camera
             self.cap_right = cv2.VideoCapture(self.right_id)
@@ -125,10 +130,14 @@ class StereoCamera:
             self.cap_right.set(cv2.CAP_PROP_FPS, self.fps)
             self.cap_right.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             
+            # Fix power line frequency for right camera (50Hz for Vietnam)
+            os.system(f"v4l2-ctl -d /dev/video{self.right_id} --set-ctrl=power_line_frequency=1")
+            
             if not self.cap_left.isOpened() or not self.cap_right.isOpened():
                 raise RuntimeError("Failed to open cameras")
             
             logger.info(f"Cameras opened: {self.width}x{self.height}@{self.fps}fps")
+            logger.info("Power line frequency set to 50Hz (Vietnam)")
             return True
             
         except Exception as e:
