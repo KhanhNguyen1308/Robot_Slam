@@ -1,0 +1,63 @@
+# Configuration for Jetson Nano Robot Control System
+
+# Serial Communication
+serial:
+  port: "/dev/ttyACM0"  # RP2040 USB port
+  baudrate: 115200
+  timeout: 0.1
+
+# Camera Settings
+camera:
+  stereo:
+    left_device: 0
+    right_device: 1
+    width: 640
+    height: 480
+    fps: 30
+  
+  # Camera calibration (update with your calibration)
+  calibration_file: "./config/stereo_calibration.yaml"
+
+# ORB-SLAM3 Settings
+orbslam:
+  path: "/home/jetson/ORB_SLAM3"
+  vocabulary: "/home/jetson/ORB_SLAM3/Vocabulary/ORBvoc.txt"
+  settings: "./config/orbslam_stereo.yaml"
+  mode: "stereo"  # stereo, monocular, rgbd
+
+# Robot Kinematics (must match RP2040 config)
+robot:
+  track_width: 0.275  # meters
+  max_linear_speed: 0.5  # m/s
+  max_angular_speed: 2.0  # rad/s
+  
+  # Safety limits
+  watchdog_timeout: 0.5  # seconds
+  emergency_stop_enabled: true
+
+# Web Server
+webserver:
+  host: "0.0.0.0"
+  port: 5000
+  debug: false
+  stream_enabled: true
+  stream_fps: 15
+
+# Control Parameters
+control:
+  update_rate: 50  # Hz
+  command_timeout: 0.5  # seconds
+  
+  # PID for velocity control (if needed)
+  pid:
+    kp: 1.0
+    ki: 0.0
+    kd: 0.1
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  save_trajectory: true
+  trajectory_file: "./logs/trajectory.csv"
+  save_images: false
+  image_dir: "./logs/images"

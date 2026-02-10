@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Robot Control Panel</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            padding: 20px 0;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-size: 2.5em;
+            color: #00d4ff;
+            text-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .panel {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .panel h2 {
+            margin-bottom: 15px;
+            color: #00d4ff;
+            font-size: 1.3em;
+        }
+
+        /* Video Grid */
+        .video-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        .video-container {
+            position: relative;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            aspect-ratio: 16/9;
+        }
+
+        .video-container h3 {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 5px 15px;
+            border-radius: 5px;
+            font-size: 0.9em;
+            z-index: 1;
+        }
+
+        .video-container img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* Controls */
+        .button-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            padding: 15px 20px;
+            font-size: 1em;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0, 212, 255, 0.4);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #ff4757 0%, #cc0033 100%);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(255, 71, 87, 0.4);
+        }
+
+        .btn-full {
+            grid-column: 1 / -1;
+        }
+
+        /* Joystick */
+        .joystick-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .joystick {
+            width: 250px;
+            height: 250px;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, rgba(0,0,0,0.3) 100%);
+            border-radius: 50%;
+            position: relative;
+            border: 3px solid rgba(0, 212, 255, 0.3);
+            box-shadow: 0 0 30px rgba(0, 212, 255, 0.2);
+        }
+
+        .joystick-center {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .joystick-handle {
+            width: 80px;
+            height: 80px;
+            background: radial-gradient(circle, #00d4ff 0%, #0066cc 100%);
+            border-radius: 50%;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            cursor: grab;
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.6);
+            transition: box-shadow 0.2s;
+        }
+
+        .joystick-handle:active {
+            cursor: grabbing;
+            box-shadow: 0 0 30px rgba(0, 212, 255, 0.9);
+        }
+
+        /* Status Panel */
+        .status-grid {
+            display: grid;
+            gap: 10px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            border-left: 3px solid #00d4ff;
+        }
+
+        .status-label {
+            color: #aaa;
+        }
+
+        .status-value {
+            font-weight: bold;
+            color: #00d4ff;
+        }
+
+        .status-value.active {
+            color: #00ff88;
+        }
+
+        .status-value.inactive {
+            color: #ff4757;
+        }
+
+        /* Velocity Display */
+        .velocity-display {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .velocity-item {
+            text-align: center;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+        }
+
+        .velocity-label {
+            font-size: 0.8em;
+            color: #aaa;
+            margin-bottom: 5px;
+        }
+
+        .velocity-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #00d4ff;
+        }
+
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .video-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Loading Animation */
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(0, 212, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #00d4ff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Robot Control Panel</h1>
+        </header>
+
+        <div class="grid">
+            <!-- Left Column: Video Feeds -->
+            <div>
+                <div class="panel">
+                    <h2>📹 Camera Feeds</h2>
+                    <div class="video-grid">
+                        <div class="video-container">
+                            <h3>Left Camera</h3>
+                            <img src="/video/left" alt="Left Camera" id="video-left">
+                        </div>
+                        <div class="video-container">
+                            <h3>Right Camera</h3>
+                            <img src="/video/right" alt="Right Camera" id="video-right">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel" style="margin-top: 20px;">
+                    <h2>📊 Velocity</h2>
+                    <div class="velocity-display">
+                        <div class="velocity-item">
+                            <div class="velocity-label">Linear (m/s)</div>
+                            <div class="velocity-value" id="vel-linear">0.00</div>
+                        </div>
+                        <div class="velocity-item">
+                            <div class="velocity-label">Angular (rad/s)</div>
+                            <div class="velocity-value" id="vel-angular">0.00</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Controls and Status -->
+            <div>
+                <div class="panel">
+                    <h2>🎮 Motor Control</h2>
+                    <div class="button-grid">
+                        <button class="btn-primary" onclick="enableMotors()">
+                            ⚡ Enable
+                        </button>
+                        <button class="btn-danger" onclick="disableMotors()">
+                            ⏸ Disable
+                        </button>
+                        <button class="btn-danger btn-full" onclick="emergencyStop()">
+                            🛑 EMERGENCY STOP
+                        </button>
+                    </div>
+
+                    <div class="joystick-container">
+                        <div class="joystick" id="joystick">
+                            <div class="joystick-center"></div>
+                            <div class="joystick-handle" id="handle"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel" style="margin-top: 20px;">
+                    <h2>📡 System Status</h2>
+                    <div class="status-grid" id="status-grid">
+                        <div class="status-item">
+                            <span class="status-label">Loading...</span>
+                            <span class="loading"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Joystick Control
+        const joystick = document.getElementById('joystick');
+        const handle = document.getElementById('handle');
+        let isDragging = false;
+        let currentLinear = 0;
+        let currentAngular = 0;
+
+        function handleMove(e) {
+            if (!isDragging) return;
+
+            const rect = joystick.getBoundingClientRect();
+            const centerX = rect.width / 2;
+            const centerY = rect.height / 2;
+
+            let x = (e.clientX || e.touches[0].clientX) - rect.left - centerX;
+            let y = (e.clientY || e.touches[0].clientY) - rect.top - centerY;
+
+            const distance = Math.sqrt(x*x + y*y);
+            const maxDistance = rect.width / 2 - 40;
+
+            if (distance > maxDistance) {
+                x = x / distance * maxDistance;
+                y = y / distance * maxDistance;
+            }
+
+            handle.style.transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`;
+
+            // Calculate velocities
+            currentLinear = -y / maxDistance * 0.5;  // max 0.5 m/s
+            currentAngular = -x / maxDistance * 2.0;  // max 2.0 rad/s
+
+            // Update display
+            document.getElementById('vel-linear').textContent = currentLinear.toFixed(2);
+            document.getElementById('vel-angular').textContent = currentAngular.toFixed(2);
+
+            setVelocity(currentLinear, currentAngular);
+        }
+
+        function resetJoystick() {
+            isDragging = false;
+            handle.style.transform = 'translate(-50%, -50%)';
+            currentLinear = 0;
+            currentAngular = 0;
+            document.getElementById('vel-linear').textContent = '0.00';
+            document.getElementById('vel-angular').textContent = '0.00';
+            setVelocity(0, 0);
+        }
+
+        handle.addEventListener('mousedown', () => isDragging = true);
+        handle.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            isDragging = true;
+        });
+
+        document.addEventListener('mouseup', resetJoystick);
+        document.addEventListener('touchend', resetJoystick);
+        document.addEventListener('mousemove', handleMove);
+        document.addEventListener('touchmove', handleMove);
+
+        // API Functions
+        function setVelocity(linear, angular) {
+            fetch('/api/velocity', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({linear, angular})
+            }).catch(err => console.error('Velocity command failed:', err));
+        }
+
+        function enableMotors() {
+            fetch('/api/enable', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        showNotification('Motors enabled', 'success');
+                    } else {
+                        showNotification('Failed to enable motors', 'error');
+                    }
+                });
+        }
+
+        function disableMotors() {
+            fetch('/api/disable', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        showNotification('Motors disabled', 'warning');
+                    } else {
+                        showNotification('Failed to disable motors', 'error');
+                    }
+                });
+        }
+
+        function emergencyStop() {
+            fetch('/api/stop', {method: 'POST'})
+                .then(r => r.json())
+                .then(() => {
+                    resetJoystick();
+                    showNotification('EMERGENCY STOP ACTIVATED', 'error');
+                });
+        }
+
+        function showNotification(message, type) {
+            // Simple notification (could be enhanced with a notification library)
+            alert(message);
+        }
+
+        // Status Update
+        function updateStatus() {
+            fetch('/api/status')
+                .then(r => r.json())
+                .then(data => {
+                    const statusGrid = document.getElementById('status-grid');
+                    statusGrid.innerHTML = `
+                        <div class="status-item">
+                            <span class="status-label">Motors</span>
+                            <span class="status-value ${data.motor_controller.enabled ? 'active' : 'inactive'}">
+                                ${data.motor_controller.enabled ? 'ENABLED' : 'DISABLED'}
+                            </span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">SLAM Tracking</span>
+                            <span class="status-value ${data.slam.tracking === 'OK' ? 'active' : 'inactive'}">
+                                ${data.slam.tracking}
+                            </span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Commands Sent</span>
+                            <span class="status-value">${data.motor_controller.commands_sent}</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Errors</span>
+                            <span class="status-value ${data.motor_controller.errors > 0 ? 'inactive' : ''}">
+                                ${data.motor_controller.errors}
+                            </span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Camera</span>
+                            <span class="status-value active">
+                                ${data.camera.width}x${data.camera.height}
+                            </span>
+                        </div>
+                    `;
+                })
+                .catch(err => {
+                    console.error('Status update failed:', err);
+                });
+        }
+
+        // Start status updates
+        setInterval(updateStatus, 1000);
+        updateStatus();
+
+        // Keyboard controls (optional)
+        document.addEventListener('keydown', (e) => {
+            const speed = 0.3;
+            const turn = 1.5;
+
+            switch(e.key) {
+                case 'w':
+                case 'ArrowUp':
+                    setVelocity(speed, 0);
+                    break;
+                case 's':
+                case 'ArrowDown':
+                    setVelocity(-speed, 0);
+                    break;
+                case 'a':
+                case 'ArrowLeft':
+                    setVelocity(0, turn);
+                    break;
+                case 'd':
+                case 'ArrowRight':
+                    setVelocity(0, -turn);
+                    break;
+                case ' ':
+                    emergencyStop();
+                    break;
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if (['w', 's', 'a', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+                setVelocity(0, 0);
+            }
+        });
+    </script>
+</body>
+</html>

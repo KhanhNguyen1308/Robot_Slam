@@ -1,0 +1,18 @@
+# Core dependencies
+numpy>=1.19.0
+opencv-python>=4.5.0
+opencv-contrib-python>=4.5.0
+
+# Serial communication
+pyserial>=3.5
+
+# Web server
+flask>=2.0.0
+flask-cors>=3.0.10
+
+# Camera and image processing
+Pillow>=8.0.0
+
+# Optional but recommended
+# scipy>=1.5.0  # For advanced image processing
+# matplotlib>=3.3.0  # For visualization
