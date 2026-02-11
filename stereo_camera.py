@@ -130,7 +130,7 @@ class StereoCamera:
             self.cap_right.set(cv2.CAP_PROP_FPS, self.fps)
             self.cap_right.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             
-            # Fix power line frequency for right camera (50Hz for Vietnam)
+            # Fix power line frequency for right camera (50Hz)
             os.system(f"v4l2-ctl -d /dev/video{self.right_id} --set-ctrl=power_line_frequency=1")
             
             if not self.cap_left.isOpened() or not self.cap_right.isOpened():
