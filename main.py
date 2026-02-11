@@ -1,28 +1,36 @@
+#!/usr/bin/env python3
 """
-Main Robot Controller
-Integrates all subsystems: Camera, SLAM, Motor Control, Web Server, IMU, Obstacle Detection
+Main Application for Autonomous Mapping Robot
+Integrates: Stereo Camera, ORB-SLAM3, Motor Control, Web Server
 """
-import numpy as np
-import cv2
-import time
-import logging
-import threading
-import signal
 import sys
-from typing import Optional
+import os
+import logging
+import time
+import signal
+import threading
+import numpy as np
 
-from serial_controller import RP2040Controller, SafetyController
-from stereo_camera import StereoCamera
-from orbslam_interface import ORBSLAM3, SimpleVisualOdometry
-from web_server import RobotWebServer
-from imu_module import ADXL345, IMUFilter
-from obstacle_detection import ObstacleDetector, SimpleObstacleAvoidance
+# Add current directory to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Setup logging
+# Import robot modules
+from jetson_motor_controller import JetsonMotorController, SafetyController
+from stereo_camera import StereoCamera, VisualOdometry
+from orb_slam3_wrapper import ORBSLAM3Wrapper, SimpleVisualSLAM
+from autonomous_mapper import OccupancyGrid, AutonomousMapper
+from web_server import init_web_server, run_web_server
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('robot.log'),
+        logging.StreamHandler()
+    ]
 )
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,505 +41,348 @@ class RobotSystem:
     
     def __init__(self, config: dict):
         self.config = config
-        
-        # Components
-        self.motor_controller = None
-        self.safety_controller = None
-        self.camera = None
-        self.slam = None
-        self.web_server = None
-        self.imu = None
-        self.imu_filter = None
-        self.obstacle_detector = None
-        self.obstacle_avoidance = None
-        
-        # State
         self.running = False
-        self.slam_pose = np.eye(4)
-        self.slam_tracking_state = "NOT_INITIALIZED"
         
-        # Current frames
-        self.current_frame_left = None
-        self.current_frame_right = None
-        self.current_timestamp = 0
-        
-        # Depth and obstacles
-        self.current_depth_map = None
-        self.current_obstacles = []
-        
-        # IMU data
-        self.imu_pitch = 0.0
-        self.imu_roll = 0.0
-        self.collision_detected = False
-        
-        # Trajectory
-        self.trajectory = []
-        
-        # Performance metrics
-        self.fps = 0
-        self.frame_count = 0
-        self.last_fps_time = time.time()
-        
-        # Control mode
-        self.autonomous_mode = False
+        # Components (initialized in setup)
+        self.stereo_camera = None
+        self.slam_system = None
+        self.motor_controller = None
+        self.occupancy_grid = None
+        self.autonomous_mapper = None
         
         # Main processing thread
-        self.main_thread = None
+        self.processing_thread = None
         
-    def initialize(self) -> bool:
-        """Initialize all subsystems"""
-        logger.info("Initializing robot system...")
-        
+        logger.info("Robot system created")
+    
+    def setup(self) -> bool:
+        """Initialize all robot components"""
         try:
-            # 1. Initialize motor controller
-            logger.info("Connecting to RP2040...")
-            self.motor_controller = RP2040Controller(
-                port=self.config.get('serial_port', '/dev/ttyACM0'),
-                baudrate=self.config.get('serial_baudrate', 115200)
+            logger.info("=== Starting Robot System Setup ===")
+            
+            # 1. Initialize Stereo Camera
+            logger.info("1. Initializing stereo camera...")
+            self.stereo_camera = StereoCamera(
+                left_cam_id=self.config['camera']['left_id'],
+                right_cam_id=self.config['camera']['right_id'],
+                calibration_file=self.config['camera']['calibration_file'],
+                width=self.config['camera']['width'],
+                height=self.config['camera']['height'],
+                fps=self.config['camera']['fps']
+            )
+            
+            if not self.stereo_camera.init_cameras():
+                logger.error("Failed to initialize cameras")
+                return False
+            
+            # Verify calibration was loaded
+            if self.stereo_camera.K_left is None:
+                logger.error("Camera calibration failed - cannot proceed")
+                return False
+            
+            # Start camera capture thread
+            self.stereo_camera.start_capture()
+            time.sleep(1)  # Let camera warm up
+            
+            # 2. Initialize SLAM System
+            logger.info("2. Initializing SLAM system...")
+            
+            if self.config['slam']['use_orbslam3']:
+                # Use ORB-SLAM3 (requires C++ bindings)
+                camera_params = {
+                    'K_left': self.stereo_camera.K_left,
+                    'D_left': self.stereo_camera.D_left,
+                    'K_right': self.stereo_camera.K_right,
+                    'baseline': abs(self.stereo_camera.T[0][0]),
+                    'width': self.config['camera']['width'],
+                    'height': self.config['camera']['height'],
+                    'fps': self.config['camera']['fps']
+                }
+                
+                self.slam_system = ORBSLAM3Wrapper(
+                    orb_slam_path=self.config['slam']['orb_slam_path'],
+                    use_viewer=self.config['slam']['use_viewer']
+                )
+                
+                if not self.slam_system.start(camera_params):
+                    logger.warning("ORB-SLAM3 failed to start, using simple SLAM")
+                    self.slam_system = SimpleVisualSLAM(self.stereo_camera.K_left)
+            else:
+                # Use simple visual SLAM
+                logger.info("Using simple visual SLAM")
+                self.slam_system = SimpleVisualSLAM(self.stereo_camera.K_left)
+            
+            # 3. Initialize Motor Controller
+            logger.info("3. Initializing motor controller...")
+            base_controller = JetsonMotorController(
+                left_step_pin=self.config['motor']['left_step_pin'],
+                left_dir_pin=self.config['motor']['left_dir_pin'],
+                left_enable_pin=self.config['motor']['left_enable_pin'],
+                left_ms1_pin=self.config['motor'].get('left_ms1_pin'),
+                left_ms2_pin=self.config['motor'].get('left_ms2_pin'),
+                left_ms3_pin=self.config['motor'].get('left_ms3_pin'),
+                right_step_pin=self.config['motor']['right_step_pin'],
+                right_dir_pin=self.config['motor']['right_dir_pin'],
+                right_enable_pin=self.config['motor']['right_enable_pin'],
+                right_ms1_pin=self.config['motor'].get('right_ms1_pin'),
+                right_ms2_pin=self.config['motor'].get('right_ms2_pin'),
+                right_ms3_pin=self.config['motor'].get('right_ms3_pin'),
+                wheel_diameter=self.config['motor']['wheel_diameter'],
+                wheel_base=self.config['motor']['wheel_base'],
+                steps_per_rev=self.config['motor']['steps_per_rev'],
+                microsteps=self.config['motor']['microsteps']
+            )
+            
+            # Wrap with safety controller
+            self.motor_controller = SafetyController(
+                base_controller,
+                max_linear=self.config['motor']['max_linear_speed'],
+                max_angular=self.config['motor']['max_angular_speed']
             )
             
             if not self.motor_controller.connect():
-                logger.error("Failed to connect to RP2040")
+                logger.error("Failed to initialize motor controller")
                 return False
             
-            # Wrap with safety controller
-            self.safety_controller = SafetyController(
-                self.motor_controller,
-                max_linear=self.config.get('max_linear_speed', 0.5),
-                max_angular=self.config.get('max_angular_speed', 2.0)
+            # 4. Create Occupancy Grid
+            logger.info("4. Creating occupancy grid...")
+            self.occupancy_grid = OccupancyGrid(
+                width=self.config['mapping']['grid_width'],
+                height=self.config['mapping']['grid_height'],
+                resolution=self.config['mapping']['resolution']
             )
             
-            # 2. Initialize stereo camera
-            logger.info("Initializing cameras...")
-            self.camera = StereoCamera(
-                left_id=self.config.get('camera_left_id', 0),
-                right_id=self.config.get('camera_right_id', 1),
-                calibration_file=self.config.get('calibration_file', 'calibration.npz'),
-                width=self.config.get('camera_width', 1280),
-                height=self.config.get('camera_height', 720),
-                fps=self.config.get('camera_fps', 30)
+            # 5. Create Autonomous Mapper
+            logger.info("5. Initializing autonomous mapper...")
+            self.autonomous_mapper = AutonomousMapper(
+                motor_controller=self.motor_controller,
+                slam_system=self.slam_system,
+                occupancy_grid=self.occupancy_grid,
+                max_linear_speed=self.config['motor']['max_linear_speed'],
+                max_angular_speed=self.config['motor']['max_angular_speed']
             )
             
-            if not self.camera.open():
-                logger.error("Failed to open cameras")
-                return False
-            
-            self.camera.start_capture()
-            
-            # 4. Initialize IMU (optional)
-            use_imu = self.config.get('use_imu', True)
-            
-            if use_imu:
-                logger.info("Initializing IMU ADXL345...")
-                self.imu = ADXL345(bus=1, g_range=2)
-                
-                if self.imu.connect():
-                    # Calibrate IMU
-                    logger.info("Calibrating IMU (keep robot still)...")
-                    time.sleep(1)
-                    self.imu.calibrate()
-                    
-                    # Start filtering
-                    self.imu_filter = IMUFilter(self.imu, alpha=0.98, update_rate=50)
-                    self.imu_filter.start()
-                    
-                    logger.info("✓ IMU initialized")
-                else:
-                    logger.warning("IMU not available - continuing without it")
-                    self.imu = None
-            
-            # 5. Initialize obstacle detection
-            logger.info("Initializing obstacle detection...")
-            
-            if self.camera.calibration_loaded:
-                # Get camera parameters
-                baseline = abs(self.camera.T[0])  # Baseline in meters
-                focal_length = self.camera.K1[0, 0]  # Focal length in pixels
-                
-                self.obstacle_detector = ObstacleDetector(
-                    camera_baseline=baseline,
-                    camera_focal_length=focal_length,
-                    min_distance=0.2,
-                    max_distance=3.0,
-                    danger_zone_distance=self.config.get('danger_zone_distance', 0.5)
-                )
-                
-                self.obstacle_avoidance = SimpleObstacleAvoidance(self.obstacle_detector)
-                
-                logger.info("✓ Obstacle detection initialized")
-            else:
-                logger.warning("Cannot initialize obstacle detection without calibration")
-            
-            # 6. Initialize ORB-SLAM3 (optional)
-            use_orbslam = self.config.get('use_orbslam', True)
-            
-            if use_orbslam:
-                logger.info("Initializing ORB-SLAM3...")
-                
-                self.slam = ORBSLAM3(
-                    orbslam_path=self.config.get('orbslam_path', '/home/jetson/ORB_SLAM3'),
-                    vocabulary_path=self.config.get('orbslam_vocabulary'),
-                    settings_path=self.config.get('orbslam_settings', 'orbslam_stereo.yaml')
-                )
-                
-                # Create settings file from camera calibration
-                camera_info = {
-                    'K1': self.camera.K1,
-                    'D1': self.camera.D1,
-                    'K2': self.camera.K2,
-                    'D2': self.camera.D2,
-                    'baseline': abs(self.camera.T[0]),
-                    'width': self.camera.width,
-                    'height': self.camera.height,
-                    'fps': self.camera.fps
-                }
-                self.slam.create_settings_file(camera_info)
-                
-                # Start SLAM
-                self.slam.start(use_viewer=self.config.get('orbslam_viewer', False))
-            else:
-                logger.info("Using simple visual odometry")
-                self.slam = SimpleVisualOdometry()
-            
-            # 7. Initialize web server
-            logger.info("Starting web server...")
-            self.web_server = RobotWebServer(
-                robot_controller=self,
-                stereo_camera=self.camera,
-                host=self.config.get('webserver_host', '0.0.0.0'),
-                port=self.config.get('webserver_port', 5000)
-            )
-            self.web_server.start()
-            
-            logger.info("✓ All systems initialized successfully")
+            logger.info("=== Robot System Setup Complete ===")
             return True
             
         except Exception as e:
-            logger.error(f"Initialization failed: {e}")
+            logger.error(f"Setup failed: {e}", exc_info=True)
             return False
     
     def start(self):
         """Start main processing loop"""
-        if self.running:
-            logger.warning("System already running")
-            return
-        
         self.running = True
-        self.main_thread = threading.Thread(target=self._main_loop, daemon=True)
-        self.main_thread.start()
+        self.processing_thread = threading.Thread(target=self._main_loop, daemon=True)
+        self.processing_thread.start()
+        logger.info("Main processing loop started")
+    
+    def _main_loop(self):
+        """Main processing loop - integrates SLAM and mapping"""
+        logger.info("Entering main processing loop")
         
-        logger.info("Robot system started")
+        frame_count = 0
+        start_time = time.time()
+        
+        while self.running:
+            try:
+                # Get latest frames from camera
+                left, right, disparity = self.stereo_camera.get_latest_frames()
+                
+                if left is not None and right is not None:
+                    # Process through SLAM
+                    timestamp = time.time()
+                    
+                    if isinstance(self.slam_system, ORBSLAM3Wrapper):
+                        # ORB-SLAM3
+                        pose = self.slam_system.process_frame(left, right, timestamp)
+                    else:
+                        # Simple SLAM
+                        pose = self.slam_system.track(left, right)
+                    
+                    # Update mapper with disparity map
+                    if disparity is not None and pose is not None:
+                        self.autonomous_mapper.update_map_from_stereo(disparity, pose)
+                    
+                    frame_count += 1
+                    
+                    # Log statistics every 100 frames
+                    if frame_count % 100 == 0:
+                        elapsed = time.time() - start_time
+                        fps = frame_count / elapsed
+                        logger.info(f"Processed {frame_count} frames at {fps:.1f} FPS")
+                        
+                        # Print SLAM stats
+                        slam_stats = self.slam_system.get_stats()
+                        logger.info(f"SLAM: {slam_stats}")
+                        
+                        # Print mapper stats
+                        mapper_stats = self.autonomous_mapper.get_stats()
+                        logger.info(f"Mapper: mode={mapper_stats['mode']}, "
+                                  f"coverage={mapper_stats['coverage_percent']:.1f}%")
+                
+                time.sleep(0.01)  # ~100 Hz max
+                
+            except Exception as e:
+                logger.error(f"Main loop error: {e}", exc_info=True)
+                time.sleep(1.0)
     
     def stop(self):
-        """Stop all subsystems"""
+        """Stop all robot systems"""
         logger.info("Stopping robot system...")
         
         self.running = False
         
-        # Disable autonomous mode
-        self.autonomous_mode = False
+        # Stop autonomous exploration
+        if self.autonomous_mapper:
+            self.autonomous_mapper.stop_exploration()
         
         # Stop motors
-        if self.safety_controller:
-            self.safety_controller.stop()
+        if self.motor_controller:
+            self.motor_controller.stop()
+            time.sleep(0.5)
+            self.motor_controller.disable()
         
         # Stop camera
-        if self.camera:
-            self.camera.close()
-        
-        # Stop IMU
-        if self.imu_filter:
-            self.imu_filter.stop()
-        if self.imu:
-            self.imu.close()
+        if self.stereo_camera:
+            self.stereo_camera.stop_capture()
+            self.stereo_camera.release()
         
         # Stop SLAM
-        if self.slam and hasattr(self.slam, 'stop'):
-            self.slam.stop()
+        if self.slam_system:
+            if hasattr(self.slam_system, 'shutdown'):
+                self.slam_system.shutdown()
         
-        # Disconnect motor controller
-        if self.motor_controller:
-            self.motor_controller.disconnect()
-        
-        # Save trajectory
-        if len(self.trajectory) > 0:
-            self._save_trajectory()
+        # Wait for processing thread
+        if self.processing_thread:
+            self.processing_thread.join(timeout=2.0)
         
         logger.info("Robot system stopped")
     
-    def _main_loop(self):
-        """Main processing loop"""
-        logger.info("Main loop started")
-        
-        while self.running:
-            try:
-                # 1. Get stereo frames
-                frame_data = self.camera.get_frames(timeout=1.0)
-                
-                if frame_data is None:
-                    logger.warning("No frames received")
-                    time.sleep(0.1)
-                    continue
-                
-                frame_left, frame_right, timestamp = frame_data
-                
-                # Store current frames for web streaming
-                self.current_frame_left = frame_left
-                self.current_frame_right = frame_right
-                self.current_timestamp = timestamp
-                
-                # 2. Rectify frames
-                rect_left, rect_right = self.camera.rectify_frames(frame_left, frame_right)
-                
-                # 3. Obstacle detection
-                if self.obstacle_detector:
-                    # Compute disparity and depth
-                    disparity = self.obstacle_detector.compute_disparity(rect_left, rect_right)
-                    depth_map = self.obstacle_detector.disparity_to_depth(disparity)
-                    self.current_depth_map = depth_map
-                    
-                    # Detect obstacles
-                    obstacles = self.obstacle_detector.detect_obstacles(depth_map, rect_left)
-                    self.current_obstacles = obstacles
-                    
-                    # Autonomous obstacle avoidance
-                    if self.autonomous_mode and self.obstacle_avoidance:
-                        linear, angular = self.obstacle_avoidance.compute_velocity(obstacles)
-                        self.set_velocity(linear, angular)
-                
-                # 4. Update IMU
-                if self.imu_filter:
-                    self.imu_pitch, self.imu_roll = self.imu_filter.get_orientation()
-                    
-                    # Check for collision
-                    if self.imu_filter.detect_collision(threshold=2.5):
-                        if not self.collision_detected:
-                            logger.warning("⚠ COLLISION DETECTED!")
-                            self.collision_detected = True
-                            self.emergency_stop()
-                    else:
-                        self.collision_detected = False
-                    
-                    # Check for excessive tilt
-                    if self.imu_filter.is_tilted(max_angle=20.0):
-                        logger.warning("⚠ Robot tilted beyond safe angle!")
-                
-                # 5. Run SLAM/Visual Odometry
-                if isinstance(self.slam, ORBSLAM3):
-                    pose = self.slam.track_stereo(rect_left, rect_right, timestamp)
-                else:
-                    pose = self.slam.track(rect_left, rect_right)
-                
-                if pose is not None:
-                    self.slam_pose = pose
-                    self.slam_tracking_state = "OK"
-                    
-                    # Log trajectory
-                    self.trajectory.append((timestamp, pose.copy()))
-                else:
-                    self.slam_tracking_state = "LOST"
-                
-                # 6. Update FPS counter
-                self.frame_count += 1
-                current_time = time.time()
-                if current_time - self.last_fps_time >= 1.0:
-                    self.fps = self.frame_count / (current_time - self.last_fps_time)
-                    self.frame_count = 0
-                    self.last_fps_time = current_time
-                    
-                    # Log status
-                    logger.debug(f"FPS: {self.fps:.1f}, "
-                               f"SLAM: {self.slam_tracking_state}, "
-                               f"Obstacles: {len(self.current_obstacles)}, "
-                               f"IMU: P={self.imu_pitch:.1f}° R={self.imu_roll:.1f}°")
-                
-            except Exception as e:
-                logger.error(f"Main loop error: {e}")
-                time.sleep(0.1)
-        
-        logger.info("Main loop stopped")
-    
-    def set_velocity(self, linear: float, angular: float) -> bool:
-        """Set robot velocity"""
-        if self.safety_controller:
-            return self.safety_controller.set_velocity(linear, angular)
-        return False
-    
-    def enable_motors(self) -> bool:
-        """Enable motors"""
+    def cleanup(self):
+        """Final cleanup"""
         if self.motor_controller:
-            return self.motor_controller.enable()
-        return False
-    
-    def disable_motors(self) -> bool:
-        """Disable motors"""
-        if self.motor_controller:
-            return self.motor_controller.disable()
-        return False
-    
-    def emergency_stop(self) -> bool:
-        """Emergency stop"""
-        if self.motor_controller:
-            return self.motor_controller.stop()
-        return False
-    
-    def enable_autonomous_mode(self, enable: bool = True):
-        """Enable/disable autonomous obstacle avoidance"""
-        self.autonomous_mode = enable
-        logger.info(f"Autonomous mode: {'ENABLED' if enable else 'DISABLED'}")
-    
-    def get_obstacle_info(self) -> dict:
-        """Get current obstacle information"""
-        if not self.obstacle_detector or not self.current_obstacles:
-            return {
-                "obstacles": [],
-                "danger_zones": {"left": "clear", "center": "clear", "right": "clear"},
-                "safe_direction": "forward"
-            }
-        
-        zones = self.obstacle_detector.get_danger_zones(self.current_obstacles)
-        direction, confidence = self.obstacle_detector.get_safe_direction(self.current_obstacles)
-        
-        obstacles_data = [{
-            "distance": obs.distance,
-            "angle": obs.angle,
-            "severity": obs.severity
-        } for obs in self.current_obstacles[:5]]  # Top 5 closest
-        
-        return {
-            "obstacles": obstacles_data,
-            "danger_zones": zones,
-            "safe_direction": direction,
-            "confidence": confidence
-        }
-    
-    def get_imu_data(self) -> dict:
-        """Get IMU sensor data"""
-        if not self.imu:
-            return {
-                "connected": False,
-                "pitch": 0.0,
-                "roll": 0.0,
-                "collision": False
-            }
-        
-        ax, ay, az = self.imu.read_accel()
-        
-        return {
-            "connected": True,
-            "pitch": self.imu_pitch,
-            "roll": self.imu_roll,
-            "accel_x": ax,
-            "accel_y": ay,
-            "accel_z": az,
-            "magnitude": self.imu.get_magnitude(),
-            "collision": self.collision_detected
-        }
-    
-    def get_trajectory(self) -> list:
-        """Get SLAM trajectory"""
-        return [(t, pose.tolist()) for t, pose in self.trajectory]
-    
-    def _save_trajectory(self):
-        """Save trajectory to file"""
-        filename = self.config.get('trajectory_file', 'trajectory.txt')
-        
-        try:
-            with open(filename, 'w') as f:
-                f.write("# timestamp tx ty tz qx qy qz qw\n")
-                for timestamp, pose in self.trajectory:
-                    # Extract translation
-                    tx, ty, tz = pose[0, 3], pose[1, 3], pose[2, 3]
-                    # For simplicity, use identity quaternion (would need proper conversion)
-                    f.write(f"{timestamp} {tx} {ty} {tz} 0 0 0 1\n")
-            
-            logger.info(f"Trajectory saved to {filename}")
-        except Exception as e:
-            logger.error(f"Failed to save trajectory: {e}")
+            self.motor_controller.disconnect()
+        logger.info("Cleanup complete")
 
 
-def signal_handler(sig, frame):
-    """Handle Ctrl+C"""
-    logger.info("Interrupt received, shutting down...")
+def load_config():
+    """Load configuration from file or use defaults"""
+    config = {
+        'camera': {
+            'left_id': 0,
+            'right_id': 1,
+            'calibration_file': 'calibration.npz',
+            'width': 640,
+            'height': 480,
+            'fps': 30
+        },
+        'slam': {
+            'use_orbslam3': False,  # Set to True if ORB-SLAM3 is properly built
+            'orb_slam_path': '/home/jetson/ORB_SLAM3',
+            'use_viewer': False
+        },
+        'motor': {
+            'left_step_pin': 33,
+            'left_dir_pin': 35,
+            'left_enable_pin': 37,
+            'left_ms1_pin': None,  # Set if using microstepping control
+            'left_ms2_pin': None,
+            'left_ms3_pin': None,
+            'right_step_pin': 32,
+            'right_dir_pin': 36,
+            'right_enable_pin': 38,
+            'right_ms1_pin': None,
+            'right_ms2_pin': None,
+            'right_ms3_pin': None,
+            'wheel_diameter': 0.066,  # 66mm
+            'wheel_base': 0.165,      # 165mm
+            'steps_per_rev': 200,
+            'microsteps': 16,
+            'max_linear_speed': 0.3,   # m/s
+            'max_angular_speed': 1.5   # rad/s
+        },
+        'mapping': {
+            'grid_width': 10.0,    # meters
+            'grid_height': 10.0,   # meters
+            'resolution': 0.05     # meters per cell
+        },
+        'web_server': {
+            'host': '0.0.0.0',
+            'port': 5000,
+            'debug': False
+        }
+    }
+    
+    return config
+
+
+def signal_handler(signum, frame):
+    """Handle Ctrl+C gracefully"""
+    logger.info("Shutdown signal received")
     if 'robot' in globals():
         robot.stop()
+        robot.cleanup()
     sys.exit(0)
 
 
 def main():
-    """Main entry point"""
-    # Configuration
-    config = {
-        # Serial
-        'serial_port': '/dev/ttyACM0',
-        'serial_baudrate': 115200,
-        
-        # Camera
-        'camera_left_id': 0,
-        'camera_right_id': 1,
-        'camera_width': 1280,
-        'camera_height': 720,
-        'camera_fps': 30,
-        'calibration_file': 'calibration.npz',
-        
-        # IMU
-        'use_imu': True,
-        'imu_bus': 1,
-        'imu_address': 0x53,
-        
-        # Obstacle Detection
-        'danger_zone_distance': 0.5,  # meters
-        
-        # ORB-SLAM3
-        'use_orbslam': True,
-        'orbslam_path': '/home/jetson/ORB_SLAM3',
-        'orbslam_vocabulary': '/home/jetson/ORB_SLAM3/Vocabulary/ORBvoc.txt',
-        'orbslam_settings': 'orbslam_stereo.yaml',
-        'orbslam_viewer': False,  # Set True if you have display
-        
-        # Robot limits
-        'max_linear_speed': 0.5,  # m/s
-        'max_angular_speed': 2.0,  # rad/s
-        
-        # Web server
-        'webserver_host': '0.0.0.0',
-        'webserver_port': 5000,
-        
-        # Logging
-        'trajectory_file': 'trajectory.txt'
-    }
+    """Main application entry point"""
+    logger.info("=" * 60)
+    logger.info("Autonomous Mapping Robot - Starting")
+    logger.info("=" * 60)
     
-    # Setup signal handler
+    # Register signal handler
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
-    # Create and initialize robot
+    # Load configuration
+    config = load_config()
+    logger.info("Configuration loaded")
+    
+    # Create robot system
     global robot
     robot = RobotSystem(config)
     
-    if not robot.initialize():
-        logger.error("Failed to initialize robot system")
+    # Setup all components
+    if not robot.setup():
+        logger.error("Robot setup failed, exiting")
         return 1
     
-    # Start main loop
+    # Enable motors
+    logger.info("Enabling motors...")
+    robot.motor_controller.enable()
+    
+    # Start main processing
     robot.start()
     
-    logger.info("=" * 60)
-    logger.info("Robot system running")
-    logger.info(f"Web interface: http://localhost:{config['webserver_port']}")
-    logger.info("Press Ctrl+C to stop")
-    logger.info("=" * 60)
+    # Initialize web server
+    logger.info("Initializing web server...")
+    init_web_server(
+        robot.motor_controller,
+        robot.slam_system,
+        robot.stereo_camera,
+        robot.autonomous_mapper
+    )
     
-    # Keep main thread alive
+    # Start web server (blocking)
+    logger.info(f"Starting web server on {config['web_server']['host']}:{config['web_server']['port']}")
+    logger.info("Access dashboard at: http://<jetson-ip>:5000")
+    
     try:
-        while True:
-            time.sleep(1)
+        run_web_server(
+            host=config['web_server']['host'],
+            port=config['web_server']['port'],
+            debug=config['web_server']['debug']
+        )
     except KeyboardInterrupt:
-        pass
+        logger.info("Keyboard interrupt received")
     finally:
         robot.stop()
+        robot.cleanup()
     
+    logger.info("Application terminated")
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

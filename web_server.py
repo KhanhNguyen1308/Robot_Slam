@@ -1,339 +1,313 @@
 """
-Flask Web Server for Robot Control
-Provides web interface and REST API for robot control
+Flask Web Server for Robot Monitoring and Control
+Provides web interface for SLAM visualization and teleoperation
 """
-from flask import Flask, render_template, Response, jsonify, request
-from flask_cors import CORS
+from flask import Flask, render_template, jsonify, request, Response
 import cv2
 import numpy as np
-import threading
-import time
 import logging
 import json
-from typing import Optional
+import base64
+from threading import Lock
+import time
 
 logger = logging.getLogger(__name__)
 
+app = Flask(__name__)
 
-class RobotWebServer:
-    """
-    Web server for robot control and monitoring
-    """
+# Global state (will be set by main application)
+robot_state = {
+    'motor_controller': None,
+    'slam_system': None,
+    'stereo_camera': None,
+    'autonomous_mapper': None,
+    'latest_frame': None,
+    'latest_map': None,
+    'lock': Lock()
+}
+
+
+def init_web_server(motor_controller, slam_system, stereo_camera, autonomous_mapper):
+    """Initialize web server with robot components"""
+    robot_state['motor_controller'] = motor_controller
+    robot_state['slam_system'] = slam_system
+    robot_state['stereo_camera'] = stereo_camera
+    robot_state['autonomous_mapper'] = autonomous_mapper
+    logger.info("Web server initialized with robot components")
+
+
+@app.route('/')
+def index():
+    """Main dashboard page"""
+    return render_template('index.html')
+
+
+@app.route('/api/status')
+def get_status():
+    """Get robot status"""
+    with robot_state['lock']:
+        motor = robot_state['motor_controller']
+        slam = robot_state['slam_system']
+        mapper = robot_state['autonomous_mapper']
+        
+        status = {
+            'timestamp': time.time(),
+            'motor': motor.get_stats() if motor else {},
+            'slam': slam.get_stats() if slam else {},
+            'mapper': mapper.get_stats() if mapper else {},
+        }
+        
+        return jsonify(status)
+
+
+@app.route('/api/pose')
+def get_pose():
+    """Get current robot pose"""
+    with robot_state['lock']:
+        slam = robot_state['slam_system']
+        
+        if slam:
+            pose = slam.get_2d_pose()
+            if pose:
+                x, y, theta = pose
+                return jsonify({
+                    'x': float(x),
+                    'y': float(y),
+                    'theta': float(theta)
+                })
+        
+        return jsonify({'x': 0.0, 'y': 0.0, 'theta': 0.0})
+
+
+@app.route('/api/motor/enable', methods=['POST'])
+def motor_enable():
+    """Enable motors"""
+    with robot_state['lock']:
+        motor = robot_state['motor_controller']
+        if motor:
+            success = motor.enable()
+            return jsonify({'success': success})
+        return jsonify({'success': False, 'error': 'Motor controller not initialized'})
+
+
+@app.route('/api/motor/disable', methods=['POST'])
+def motor_disable():
+    """Disable motors"""
+    with robot_state['lock']:
+        motor = robot_state['motor_controller']
+        if motor:
+            success = motor.disable()
+            return jsonify({'success': success})
+        return jsonify({'success': False, 'error': 'Motor controller not initialized'})
+
+
+@app.route('/api/motor/stop', methods=['POST'])
+def motor_stop():
+    """Emergency stop"""
+    with robot_state['lock']:
+        motor = robot_state['motor_controller']
+        if motor:
+            success = motor.stop()
+            return jsonify({'success': success})
+        return jsonify({'success': False, 'error': 'Motor controller not initialized'})
+
+
+@app.route('/api/motor/velocity', methods=['POST'])
+def set_velocity():
+    """Set motor velocities"""
+    data = request.json
+    linear = data.get('linear', 0.0)
+    angular = data.get('angular', 0.0)
     
-    def __init__(self, 
-                 robot_controller,
-                 stereo_camera,
-                 host: str = "0.0.0.0",
-                 port: int = 5000):
-        
-        self.robot = robot_controller
-        self.camera = stereo_camera
-        self.host = host
-        self.port = port
-        
-        # Flask app
-        self.app = Flask(__name__)
-        CORS(self.app)
-        
-        # Streaming
-        self.stream_enabled = True
-        self.stream_fps = 15
-        self.last_frame = None
-        self.frame_lock = threading.Lock()
-        
-        # Setup routes
-        self._setup_routes()
-        
-        # Server thread
-        self.server_thread = None
-        self.running = False
+    with robot_state['lock']:
+        motor = robot_state['motor_controller']
+        if motor:
+            success = motor.send_velocity(linear, angular)
+            return jsonify({'success': success})
+        return jsonify({'success': False, 'error': 'Motor controller not initialized'})
+
+
+@app.route('/api/exploration/start', methods=['POST'])
+def start_exploration():
+    """Start autonomous exploration"""
+    with robot_state['lock']:
+        mapper = robot_state['autonomous_mapper']
+        if mapper:
+            mapper.start_exploration()
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'Mapper not initialized'})
+
+
+@app.route('/api/exploration/stop', methods=['POST'])
+def stop_exploration():
+    """Stop autonomous exploration"""
+    with robot_state['lock']:
+        mapper = robot_state['autonomous_mapper']
+        if mapper:
+            mapper.stop_exploration()
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'Mapper not initialized'})
+
+
+@app.route('/api/map/save', methods=['POST'])
+def save_map():
+    """Save current map"""
+    data = request.json
+    filepath = data.get('filepath', 'map.npz')
     
-    def _setup_routes(self):
-        """Setup Flask routes"""
-        
-        @self.app.route('/')
-        def index():
-            """Main control page"""
-            return render_template('index.html')
-        
-        @self.app.route('/api/status')
-        def get_status():
-            """Get robot status"""
-            return jsonify({
-                "motor_controller": self.robot.motor_controller.get_stats(),
-                "slam": {
-                    "pose": self.robot.slam_pose.tolist() if self.robot.slam_pose is not None else None,
-                    "tracking": self.robot.slam_tracking_state
-                },
-                "camera": self.camera.get_camera_info(),
-                "imu": self.robot.get_imu_data(),
-                "obstacles": self.robot.get_obstacle_info(),
-                "autonomous_mode": self.robot.autonomous_mode,
-                "timestamp": time.time()
-            })
-        
-        @self.app.route('/api/obstacles')
-        def get_obstacles():
-            """Get obstacle detection info"""
-            return jsonify(self.robot.get_obstacle_info())
-        
-        @self.app.route('/api/imu')
-        def get_imu():
-            """Get IMU data"""
-            return jsonify(self.robot.get_imu_data())
-        
-        @self.app.route('/api/autonomous', methods=['POST'])
-        def set_autonomous():
-            """Enable/disable autonomous mode"""
-            data = request.json
-            enable = data.get('enable', False)
-            self.robot.enable_autonomous_mode(enable)
-            return jsonify({
-                "success": True,
-                "autonomous_mode": self.robot.autonomous_mode
-            })
-        
-        @self.app.route('/api/velocity', methods=['POST'])
-        def set_velocity():
-            """Set robot velocity"""
-            data = request.json
-            linear = data.get('linear', 0)
-            angular = data.get('angular', 0)
-            
-            success = self.robot.set_velocity(linear, angular)
-            
-            return jsonify({
-                "success": success,
-                "linear": linear,
-                "angular": angular
-            })
-        
-        @self.app.route('/api/enable', methods=['POST'])
-        def enable_motors():
-            """Enable motors"""
-            success = self.robot.enable_motors()
-            return jsonify({"success": success})
-        
-        @self.app.route('/api/disable', methods=['POST'])
-        def disable_motors():
-            """Disable motors"""
-            success = self.robot.disable_motors()
-            return jsonify({"success": success})
-        
-        @self.app.route('/api/stop', methods=['POST'])
-        def emergency_stop():
-            """Emergency stop"""
-            success = self.robot.emergency_stop()
-            return jsonify({"success": success})
-        
-        @self.app.route('/video/left')
-        def video_left():
-            """Stream left camera"""
-            return Response(
-                self._generate_stream('left'),
-                mimetype='multipart/x-mixed-replace; boundary=frame'
-            )
-        
-        @self.app.route('/video/right')
-        def video_right():
-            """Stream right camera"""
-            return Response(
-                self._generate_stream('right'),
-                mimetype='multipart/x-mixed-replace; boundary=frame'
-            )
-        
-        @self.app.route('/video/stereo')
-        def video_stereo():
-            """Stream stereo (side by side)"""
-            return Response(
-                self._generate_stream('stereo'),
-                mimetype='multipart/x-mixed-replace; boundary=frame'
-            )
-        
-        @self.app.route('/video/obstacles')
-        def video_obstacles():
-            """Stream with obstacle overlay"""
-            return Response(
-                self._generate_stream('obstacles'),
-                mimetype='multipart/x-mixed-replace; boundary=frame'
-            )
-        
-        @self.app.route('/video/depth')
-        def video_depth():
-            """Stream depth map"""
-            return Response(
-                self._generate_stream('depth'),
-                mimetype='multipart/x-mixed-replace; boundary=frame'
-            )
-        
-        @self.app.route('/api/trajectory')
-        def get_trajectory():
-            """Get SLAM trajectory"""
-            return jsonify({
-                "trajectory": self.robot.get_trajectory(),
-                "length": len(self.robot.trajectory)
-            })
+    with robot_state['lock']:
+        mapper = robot_state['autonomous_mapper']
+        if mapper:
+            mapper.save_map(filepath)
+            return jsonify({'success': True, 'filepath': filepath})
+        return jsonify({'success': False, 'error': 'Mapper not initialized'})
+
+
+@app.route('/api/map/load', methods=['POST'])
+def load_map():
+    """Load saved map"""
+    data = request.json
+    filepath = data.get('filepath', 'map.npz')
     
-    def _generate_stream(self, mode: str):
-        """Generate video stream"""
-        while self.stream_enabled:
-            if self.robot.current_frame_left is None:
-                time.sleep(0.1)
-                continue
+    with robot_state['lock']:
+        mapper = robot_state['autonomous_mapper']
+        if mapper:
+            mapper.load_map(filepath)
+            return jsonify({'success': True, 'filepath': filepath})
+        return jsonify({'success': False, 'error': 'Mapper not initialized'})
+
+
+@app.route('/video_feed')
+def video_feed():
+    """Video streaming route for stereo camera"""
+    return Response(generate_frames(),
+                   mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+def generate_frames():
+    """Generate video frames for streaming"""
+    while True:
+        with robot_state['lock']:
+            camera = robot_state['stereo_camera']
             
-            try:
-                if mode == 'left':
-                    frame = self.robot.current_frame_left.copy()
-                elif mode == 'right':
-                    frame = self.robot.current_frame_right.copy()
-                elif mode == 'stereo':
-                    left = self.robot.current_frame_left
-                    right = self.robot.current_frame_right
-                    frame = np.hstack([left, right])
-                elif mode == 'obstacles':
-                    # Draw obstacles on left frame
-                    frame = self.robot.current_frame_left.copy()
-                    if self.robot.obstacle_detector and self.robot.current_obstacles:
-                        frame = self.robot.obstacle_detector.visualize_obstacles(
-                            frame, 
-                            self.robot.current_obstacles,
-                            self.robot.current_depth_map
-                        )
-                elif mode == 'depth':
-                    # Show depth map
-                    if self.robot.current_depth_map is not None:
-                        depth_norm = cv2.normalize(self.robot.current_depth_map, None, 0, 255, cv2.NORM_MINMAX)
-                        frame = cv2.applyColorMap(depth_norm.astype(np.uint8), cv2.COLORMAP_JET)
+            if camera:
+                left, right, disparity = camera.get_latest_frames()
+                
+                if left is not None:
+                    # Create side-by-side view
+                    if right is not None:
+                        combined = np.hstack([left, right])
                     else:
-                        frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                        cv2.putText(frame, "No depth data", (200, 240),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                else:
-                    continue
+                        combined = left
+                    
+                    # Encode frame
+                    ret, buffer = cv2.imencode('.jpg', combined)
+                    if ret:
+                        frame = buffer.tobytes()
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        
+        time.sleep(0.033)  # ~30 FPS
+
+
+@app.route('/map_feed')
+def map_feed():
+    """Map streaming route"""
+    return Response(generate_map(),
+                   mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+def generate_map():
+    """Generate map frames for streaming"""
+    while True:
+        with robot_state['lock']:
+            mapper = robot_state['autonomous_mapper']
+            
+            if mapper:
+                # Get occupancy grid image
+                map_img = mapper.grid.get_image()
                 
-                # Add overlay info
-                frame = self._add_overlay(frame, mode)
+                # Overlay robot position
+                if mapper.x is not None:
+                    robot_gx, robot_gy = mapper.grid.world_to_grid(mapper.x, mapper.y)
+                    if mapper.grid.is_valid(robot_gx, robot_gy):
+                        # Draw robot as red circle
+                        cv2.circle(map_img, (robot_gx, robot_gy), 5, (0, 0, 255), -1)
+                        
+                        # Draw heading indicator
+                        arrow_len = 10
+                        end_x = int(robot_gx + arrow_len * np.cos(mapper.theta))
+                        end_y = int(robot_gy + arrow_len * np.sin(mapper.theta))
+                        cv2.arrowedLine(map_img, (robot_gx, robot_gy), 
+                                      (end_x, end_y), (255, 0, 0), 2)
                 
-                # Encode as JPEG
-                ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                # Overlay goal if exists
+                if mapper.planner.current_goal:
+                    goal_x, goal_y = mapper.planner.current_goal
+                    goal_gx, goal_gy = mapper.grid.world_to_grid(goal_x, goal_y)
+                    if mapper.grid.is_valid(goal_gx, goal_gy):
+                        cv2.circle(map_img, (goal_gx, goal_gy), 5, (0, 255, 0), -1)
+                
+                # Resize for display
+                scale = 4
+                display_img = cv2.resize(map_img, None, fx=scale, fy=scale, 
+                                       interpolation=cv2.INTER_NEAREST)
+                
+                # Encode
+                ret, buffer = cv2.imencode('.jpg', display_img)
                 if ret:
-                    frame_bytes = buffer.tobytes()
+                    frame = buffer.tobytes()
                     yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                
-            except Exception as e:
-                logger.error(f"Stream error: {e}")
-            
-            time.sleep(1.0 / self.stream_fps)
-    
-    def _add_overlay(self, frame: np.ndarray, mode: str) -> np.ndarray:
-        """Add status overlay to frame"""
-        overlay = frame.copy()
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
         
-        # Status text
-        status_text = [
-            f"Tracking: {self.robot.slam_tracking_state}",
-            f"Motors: {'ON' if self.robot.motor_controller.enabled else 'OFF'}",
-            f"FPS: {self.robot.fps:.1f}"
-        ]
-        
-        # Add IMU data if available
-        if self.robot.imu:
-            status_text.append(f"IMU: P={self.robot.imu_pitch:.1f}° R={self.robot.imu_roll:.1f}°")
-        
-        # Add obstacle count
-        if self.robot.current_obstacles:
-            status_text.append(f"Obstacles: {len(self.robot.current_obstacles)}")
-        
-        # Add autonomous mode indicator
-        if self.robot.autonomous_mode:
-            status_text.append("AUTO MODE")
-        
-        # Draw background
-        bg_height = 25 + len(status_text) * 20
-        cv2.rectangle(overlay, (5, 5), (300, bg_height), (0, 0, 0), -1)
-        
-        # Draw text
-        y = 25
-        for text in status_text:
-            color = (0, 255, 0)
-            if "AUTO MODE" in text:
-                color = (0, 255, 255)
-            elif "Obstacles" in text:
-                color = (0, 165, 255)
-            
-            cv2.putText(overlay, text, (10, y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-            y += 20
-        
-        # Blend
-        frame = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
-        
-        return frame
-    
-    def start(self):
-        """Start web server in background thread"""
-        if self.running:
-            return
-        
-        self.running = True
-        self.server_thread = threading.Thread(
-            target=self._run_server,
-            daemon=True
-        )
-        self.server_thread.start()
-        
-        logger.info(f"Web server starting on http://{self.host}:{self.port}")
-    
-    def _run_server(self):
-        """Run Flask server"""
-        self.app.run(
-            host=self.host,
-            port=self.port,
-            debug=False,
-            threaded=True,
-            use_reloader=False
-        )
-    
-    def stop(self):
-        """Stop web server"""
-        self.running = False
-        self.stream_enabled = False
-        logger.info("Web server stopped")
+        time.sleep(0.1)  # 10 FPS
 
 
-# HTML Template
-INDEX_HTML = """
-<!DOCTYPE html>
+def create_html_template():
+    """Create HTML template for web interface"""
+    html_content = """<!DOCTYPE html>
 <html>
 <head>
-    <title>Robot Control</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Robot Control Dashboard</title>
     <style>
         body {
             font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: #1a1a1a;
-            color: #fff;
+            margin: 20px;
+            background-color: #f0f0f0;
         }
         .container {
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
         h1 {
+            color: #333;
             text-align: center;
-            color: #4CAF50;
         }
-        .video-grid {
+        .grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-bottom: 20px;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .panel {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            background-color: #fafafa;
+        }
+        .panel h2 {
+            margin-top: 0;
+            color: #555;
         }
         .video-container {
-            background: #000;
-            border-radius: 8px;
+            position: relative;
+            width: 100%;
+            background-color: #000;
+            border-radius: 5px;
             overflow: hidden;
         }
         .video-container img {
@@ -342,198 +316,298 @@ INDEX_HTML = """
             display: block;
         }
         .controls {
-            background: #2a2a2a;
-            padding: 20px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-        }
-        .button-group {
-            display: flex;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
             gap: 10px;
-            margin-bottom: 15px;
+            margin-top: 10px;
         }
         button {
-            padding: 12px 24px;
-            font-size: 16px;
+            padding: 10px 20px;
             border: none;
             border-radius: 5px;
             cursor: pointer;
-            transition: background 0.3s;
+            font-size: 14px;
+            transition: background-color 0.3s;
         }
         .btn-primary {
-            background: #4CAF50;
+            background-color: #4CAF50;
             color: white;
         }
         .btn-primary:hover {
-            background: #45a049;
+            background-color: #45a049;
         }
         .btn-danger {
-            background: #f44336;
+            background-color: #f44336;
             color: white;
         }
         .btn-danger:hover {
-            background: #da190b;
+            background-color: #da190b;
+        }
+        .btn-warning {
+            background-color: #ff9800;
+            color: white;
+        }
+        .btn-warning:hover {
+            background-color: #e68900;
+        }
+        .status-item {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: white;
+            border-radius: 5px;
+            border-left: 4px solid #4CAF50;
         }
         .joystick {
             width: 200px;
             height: 200px;
-            background: #333;
+            border: 2px solid #333;
             border-radius: 50%;
             margin: 20px auto;
             position: relative;
-            touch-action: none;
+            background-color: #e0e0e0;
         }
         .joystick-handle {
-            width: 60px;
-            height: 60px;
-            background: #4CAF50;
+            width: 50px;
+            height: 50px;
             border-radius: 50%;
+            background-color: #4CAF50;
             position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            cursor: pointer;
-        }
-        .status {
-            background: #2a2a2a;
-            padding: 15px;
-            border-radius: 8px;
-            font-family: monospace;
-        }
-        .status-item {
-            margin: 5px 0;
+            top: 75px;
+            left: 75px;
+            cursor: move;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🤖 Robot Control Panel</h1>
+        <h1>🤖 Autonomous Mapping Robot Dashboard</h1>
         
-        <div class="video-grid">
-            <div class="video-container">
-                <h3 style="text-align: center; margin: 10px;">Left Camera</h3>
-                <img src="/video/left" alt="Left Camera">
-            </div>
-            <div class="video-container">
-                <h3 style="text-align: center; margin: 10px;">Right Camera</h3>
-                <img src="/video/right" alt="Right Camera">
-            </div>
-        </div>
-        
-        <div class="controls">
-            <h2>Motor Control</h2>
-            <div class="button-group">
-                <button class="btn-primary" onclick="enableMotors()">Enable Motors</button>
-                <button class="btn-danger" onclick="disableMotors()">Disable Motors</button>
-                <button class="btn-danger" onclick="emergencyStop()">EMERGENCY STOP</button>
+        <div class="grid">
+            <!-- Camera Feed -->
+            <div class="panel">
+                <h2>📷 Stereo Camera Feed</h2>
+                <div class="video-container">
+                    <img src="{{ url_for('video_feed') }}" alt="Stereo Camera">
+                </div>
             </div>
             
-            <div class="joystick" id="joystick">
-                <div class="joystick-handle" id="handle"></div>
+            <!-- Map View -->
+            <div class="panel">
+                <h2>🗺️ Occupancy Grid Map</h2>
+                <div class="video-container">
+                    <img src="{{ url_for('map_feed') }}" alt="Map">
+                </div>
             </div>
-        </div>
-        
-        <div class="status" id="status">
-            <h3>Status</h3>
-            <div id="status-content">Loading...</div>
+            
+            <!-- Motor Controls -->
+            <div class="panel">
+                <h2>⚙️ Motor Control</h2>
+                <div class="controls">
+                    <button class="btn-primary" onclick="enableMotors()">Enable Motors</button>
+                    <button class="btn-warning" onclick="disableMotors()">Disable Motors</button>
+                    <button class="btn-danger" onclick="emergencyStop()">STOP</button>
+                </div>
+                
+                <h3>Manual Control</h3>
+                <div class="controls">
+                    <button class="btn-primary" onclick="moveForward()">↑ Forward</button>
+                    <button class="btn-primary" onclick="moveBackward()">↓ Backward</button>
+                    <button class="btn-primary" onclick="turnLeft()">← Left</button>
+                    <button class="btn-primary" onclick="turnRight()">→ Right</button>
+                    <button class="btn-warning" onclick="stopMoving()">Stop</button>
+                </div>
+                
+                <div id="motor-status" class="status-item">
+                    <strong>Status:</strong> <span id="motor-state">Unknown</span>
+                </div>
+            </div>
+            
+            <!-- Exploration Control -->
+            <div class="panel">
+                <h2>🎯 Autonomous Exploration</h2>
+                <div class="controls">
+                    <button class="btn-primary" onclick="startExploration()">Start Exploration</button>
+                    <button class="btn-danger" onclick="stopExploration()">Stop Exploration</button>
+                </div>
+                
+                <div class="controls">
+                    <button class="btn-warning" onclick="saveMap()">Save Map</button>
+                    <button class="btn-warning" onclick="loadMap()">Load Map</button>
+                </div>
+                
+                <div id="exploration-status" class="status-item">
+                    <div><strong>Mode:</strong> <span id="exp-mode">Idle</span></div>
+                    <div><strong>Coverage:</strong> <span id="coverage">0%</span></div>
+                    <div><strong>Frontiers:</strong> <span id="frontiers">0</span></div>
+                </div>
+            </div>
+            
+            <!-- Robot Status -->
+            <div class="panel">
+                <h2>📊 Robot Status</h2>
+                <div id="pose-status" class="status-item">
+                    <div><strong>X:</strong> <span id="pose-x">0.00</span> m</div>
+                    <div><strong>Y:</strong> <span id="pose-y">0.00</span> m</div>
+                    <div><strong>θ:</strong> <span id="pose-theta">0.00</span> rad</div>
+                </div>
+                
+                <div id="slam-status" class="status-item">
+                    <div><strong>SLAM State:</strong> <span id="slam-state">Unknown</span></div>
+                    <div><strong>Frames:</strong> <span id="slam-frames">0</span></div>
+                    <div><strong>Map Points:</strong> <span id="map-points">0</span></div>
+                </div>
+            </div>
+            
+            <!-- System Info -->
+            <div class="panel">
+                <h2>💻 System Information</h2>
+                <div id="system-status" class="status-item">
+                    <div><strong>Commands Sent:</strong> <span id="cmd-count">0</span></div>
+                    <div><strong>Errors:</strong> <span id="error-count">0</span></div>
+                    <div><strong>Uptime:</strong> <span id="uptime">0s</span></div>
+                </div>
+            </div>
         </div>
     </div>
     
     <script>
-        // Joystick control
-        const joystick = document.getElementById('joystick');
-        const handle = document.getElementById('handle');
-        let isDragging = false;
+        // Update status every second
+        setInterval(updateStatus, 1000);
         
-        function handleMove(e) {
-            if (!isDragging) return;
-            
-            const rect = joystick.getBoundingClientRect();
-            const centerX = rect.width / 2;
-            const centerY = rect.height / 2;
-            
-            let x = (e.clientX || e.touches[0].clientX) - rect.left - centerX;
-            let y = (e.clientY || e.touches[0].clientY) - rect.top - centerY;
-            
-            const distance = Math.sqrt(x*x + y*y);
-            const maxDistance = rect.width / 2 - 30;
-            
-            if (distance > maxDistance) {
-                x = x / distance * maxDistance;
-                y = y / distance * maxDistance;
-            }
-            
-            handle.style.transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`;
-            
-            // Send velocity command
-            const linear = -y / maxDistance * 0.5;  // max 0.5 m/s
-            const angular = -x / maxDistance * 2.0;  // max 2.0 rad/s
-            
-            setVelocity(linear, angular);
-        }
-        
-        handle.addEventListener('mousedown', () => isDragging = true);
-        handle.addEventListener('touchstart', () => isDragging = true);
-        
-        document.addEventListener('mouseup', () => {
-            isDragging = false;
-            handle.style.transform = 'translate(-50%, -50%)';
-            setVelocity(0, 0);
-        });
-        
-        document.addEventListener('touchend', () => {
-            isDragging = false;
-            handle.style.transform = 'translate(-50%, -50%)';
-            setVelocity(0, 0);
-        });
-        
-        document.addEventListener('mousemove', handleMove);
-        document.addEventListener('touchmove', handleMove);
-        
-        // API calls
-        function setVelocity(linear, angular) {
-            fetch('/api/velocity', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({linear, angular})
-            });
-        }
-        
-        function enableMotors() {
-            fetch('/api/enable', {method: 'POST'})
-                .then(r => r.json())
-                .then(data => alert(data.success ? 'Motors enabled' : 'Failed'));
-        }
-        
-        function disableMotors() {
-            fetch('/api/disable', {method: 'POST'})
-                .then(r => r.json())
-                .then(data => alert(data.success ? 'Motors disabled' : 'Failed'));
-        }
-        
-        function emergencyStop() {
-            fetch('/api/stop', {method: 'POST'})
-                .then(r => r.json())
-                .then(data => alert('Emergency stop activated'));
-        }
-        
-        // Status update
         function updateStatus() {
             fetch('/api/status')
-                .then(r => r.json())
+                .then(response => response.json())
                 .then(data => {
-                    document.getElementById('status-content').innerHTML = `
-                        <div class="status-item">Motors: ${data.motor_controller.enabled ? 'ON' : 'OFF'}</div>
-                        <div class="status-item">SLAM Tracking: ${data.slam.tracking}</div>
-                        <div class="status-item">Commands Sent: ${data.motor_controller.commands_sent}</div>
-                        <div class="status-item">Errors: ${data.motor_controller.errors}</div>
-                    `;
+                    // Motor status
+                    document.getElementById('motor-state').textContent = 
+                        data.motor.enabled ? 'Enabled' : 'Disabled';
+                    document.getElementById('cmd-count').textContent = data.motor.commands_sent || 0;
+                    document.getElementById('error-count').textContent = data.motor.errors || 0;
+                    
+                    // SLAM status
+                    document.getElementById('slam-state').textContent = 
+                        data.slam.tracking_state || 'Unknown';
+                    document.getElementById('slam-frames').textContent = 
+                        data.slam.frames_processed || 0;
+                    document.getElementById('map-points').textContent = 
+                        data.slam.map_points || 0;
+                    
+                    // Mapper status
+                    document.getElementById('exp-mode').textContent = 
+                        data.mapper.mode || 'idle';
+                    document.getElementById('coverage').textContent = 
+                        (data.mapper.coverage_percent || 0).toFixed(1) + '%';
+                    document.getElementById('frontiers').textContent = 
+                        data.mapper.frontiers_visited || 0;
+                });
+            
+            // Update pose
+            fetch('/api/pose')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('pose-x').textContent = data.x.toFixed(2);
+                    document.getElementById('pose-y').textContent = data.y.toFixed(2);
+                    document.getElementById('pose-theta').textContent = data.theta.toFixed(2);
                 });
         }
         
-        setInterval(updateStatus, 1000);
-        updateStatus();
+        function enableMotors() {
+            fetch('/api/motor/enable', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => console.log('Motors enabled:', data));
+        }
+        
+        function disableMotors() {
+            fetch('/api/motor/disable', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => console.log('Motors disabled:', data));
+        }
+        
+        function emergencyStop() {
+            fetch('/api/motor/stop', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => console.log('Emergency stop:', data));
+        }
+        
+        function sendVelocity(linear, angular) {
+            fetch('/api/motor/velocity', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({linear: linear, angular: angular})
+            });
+        }
+        
+        function moveForward() { sendVelocity(0.2, 0); }
+        function moveBackward() { sendVelocity(-0.2, 0); }
+        function turnLeft() { sendVelocity(0, 1.0); }
+        function turnRight() { sendVelocity(0, -1.0); }
+        function stopMoving() { sendVelocity(0, 0); }
+        
+        function startExploration() {
+            fetch('/api/exploration/start', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => console.log('Exploration started:', data));
+        }
+        
+        function stopExploration() {
+            fetch('/api/exploration/stop', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => console.log('Exploration stopped:', data));
+        }
+        
+        function saveMap() {
+            const filename = prompt('Enter filename:', 'room_map.npz');
+            if (filename) {
+                fetch('/api/map/save', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({filepath: filename})
+                })
+                .then(response => response.json())
+                .then(data => alert('Map saved: ' + data.filepath));
+            }
+        }
+        
+        function loadMap() {
+            const filename = prompt('Enter filename:', 'room_map.npz');
+            if (filename) {
+                fetch('/api/map/load', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({filepath: filename})
+                })
+                .then(response => response.json())
+                .then(data => alert('Map loaded: ' + data.filepath));
+            }
+        }
+        
+        // Keyboard controls
+        document.addEventListener('keydown', (e) => {
+            switch(e.key) {
+                case 'ArrowUp': moveForward(); break;
+                case 'ArrowDown': moveBackward(); break;
+                case 'ArrowLeft': turnLeft(); break;
+                case 'ArrowRight': turnRight(); break;
+                case ' ': stopMoving(); break;
+            }
+        });
     </script>
 </body>
-</html>
-"""
+</html>"""
+    
+    return html_content
+
+
+def save_html_template():
+    """Save HTML template to templates directory"""
+    import os
+    os.makedirs('templates', exist_ok=True)
+    with open('templates/index.html', 'w') as f:
+        f.write(create_html_template())
+    logger.info("HTML template saved to templates/index.html")
+
+
+def run_web_server(host='0.0.0.0', port=5000, debug=False):
+    """Run Flask web server"""
+    save_html_template()
+    app.run(host=host, port=port, debug=debug, threaded=True)
