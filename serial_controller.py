@@ -18,7 +18,7 @@ class RP2040Controller:
     Thread-safe with automatic reconnection
     """
     
-    def __init__(self, port: str = "/dev/ttyACM0", baudrate: int = 115200, timeout: float = 0.1):
+    def __init__(self, port: str = "/dev/ttyACM0", baudrate: int = 115200, timeout: float = 0.5):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
@@ -29,6 +29,8 @@ class RP2040Controller:
         
         self.lock = threading.Lock()
         self.last_command_time = 0
+        self.reconnect_attempts = 0
+        self.last_reconnect_time = 0
         
         # Statistics
         self.commands_sent = 0
@@ -37,14 +39,24 @@ class RP2040Controller:
     def connect(self) -> bool:
         """Establish serial connection to RP2040"""
         try:
+            # Close existing connection if any
+            if self.serial and self.serial.is_open:
+                self.serial.close()
+            
             self.serial = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
                 timeout=self.timeout,
-                write_timeout=self.timeout
+                write_timeout=2.0  # Longer write timeout to prevent blocking
             )
-            time.sleep(2)  # Wait for RP2040 to reset
+            
+            # Clear buffers
+            self.serial.reset_input_buffer()
+            self.serial.reset_output_buffer()
+            
+            time.sleep(0.5)  # Wait for RP2040 to be ready
             self.connected = True
+            self.reconnect_attempts = 0
             logger.info(f"Connected to RP2040 on {self.port}")
             return True
             
@@ -66,8 +78,23 @@ class RP2040Controller:
     def _send_command(self, cmd: Dict[str, Any]) -> bool:
         """Send JSON command to RP2040"""
         if not self.connected or not self.serial or not self.serial.is_open:
-            logger.warning("Not connected to RP2040")
-            return False
+            # Limit reconnection attempts (max once every 2 seconds)
+            current_time = time.time()
+            if current_time - self.last_reconnect_time < 2.0:
+                return False
+            
+            self.last_reconnect_time = current_time
+            self.reconnect_attempts += 1
+            
+            if self.reconnect_attempts > 3:
+                # Too many failed reconnection attempts
+                return False
+            
+            # Try to reconnect
+            if self.connect():
+                logger.info("Reconnected to RP2040")
+            else:
+                return False
         
         try:
             with self.lock:
@@ -82,6 +109,14 @@ class RP2040Controller:
             logger.error(f"Serial communication error: {e}")
             self.errors += 1
             self.connected = False
+            
+            # Close the connection to force clean reconnect
+            try:
+                if self.serial and self.serial.is_open:
+                    self.serial.close()
+            except:
+                pass
+            
             return False
     
     def send_velocity(self, linear: float, angular: float) -> bool:

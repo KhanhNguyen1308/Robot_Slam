@@ -70,12 +70,17 @@ class StereoCamera:
         try:
             calib = np.load(calibration_file)
             
-            self.K1 = calib['K1']
-            self.D1 = calib['D1']
-            self.K2 = calib['K2']
-            self.D2 = calib['D2']
+            # Support both key naming conventions
+            self.K1 = calib.get('K1', calib.get('mtx_l'))
+            self.D1 = calib.get('D1', calib.get('dist_l'))
+            self.K2 = calib.get('K2', calib.get('mtx_r'))
+            self.D2 = calib.get('D2', calib.get('dist_r'))
             self.R = calib['R']
             self.T = calib['T']
+            
+            # Validate that all required parameters were loaded
+            if any(v is None for v in [self.K1, self.D1, self.K2, self.D2, self.R, self.T]):
+                raise ValueError("Missing required calibration parameters")
             
             # Compute rectification transforms
             self.R1, self.R2, self.P1, self.P2, self.Q, _, _ = cv2.stereoRectify(
@@ -100,7 +105,7 @@ class StereoCamera:
             
             self.calibration_loaded = True
             logger.info(f"Calibration loaded from {calibration_file}")
-            logger.info(f"Baseline: {abs(self.T[0]):.4f}m")
+            logger.info(f"Baseline: {float(abs(self.T[0])):.4f}m")
             return True
             
         except Exception as e:
@@ -120,8 +125,11 @@ class StereoCamera:
             self.cap_left.set(cv2.CAP_PROP_FPS, self.fps)
             self.cap_left.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             
-            # Fix power line frequency for left camera (50Hz for Vietnam)
-            os.system(f"v4l2-ctl -d /dev/video{self.left_id} --set-ctrl=power_line_frequency=1")
+            # Configure left camera settings via v4l2-ctl
+            os.system(f"v4l2-ctl -d /dev/video{self.left_id} --set-ctrl=power_line_frequency=1")  # 50Hz
+            os.system(f"v4l2-ctl -d /dev/video{self.left_id} --set-ctrl=exposure_auto=3")  # Auto exposure
+            os.system(f"v4l2-ctl -d /dev/video{self.left_id} --set-ctrl=white_balance_temperature_auto=1")  # Auto WB
+            os.system(f"v4l2-ctl -d /dev/video{self.left_id} --set-ctrl=brightness=32")  # Moderate brightness
             
             # Open right camera
             self.cap_right = cv2.VideoCapture(self.right_id)
@@ -130,14 +138,17 @@ class StereoCamera:
             self.cap_right.set(cv2.CAP_PROP_FPS, self.fps)
             self.cap_right.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             
-            # Fix power line frequency for right camera (50Hz)
-            os.system(f"v4l2-ctl -d /dev/video{self.right_id} --set-ctrl=power_line_frequency=1")
+            # Configure right camera settings via v4l2-ctl
+            os.system(f"v4l2-ctl -d /dev/video{self.right_id} --set-ctrl=power_line_frequency=1")  # 50Hz
+            os.system(f"v4l2-ctl -d /dev/video{self.right_id} --set-ctrl=exposure_auto=3")  # Auto exposure
+            os.system(f"v4l2-ctl -d /dev/video{self.right_id} --set-ctrl=white_balance_temperature_auto=1")  # Auto WB
+            os.system(f"v4l2-ctl -d /dev/video{self.right_id} --set-ctrl=brightness=32")  # Moderate brightness
             
             if not self.cap_left.isOpened() or not self.cap_right.isOpened():
                 raise RuntimeError("Failed to open cameras")
             
             logger.info(f"Cameras opened: {self.width}x{self.height}@{self.fps}fps")
-            logger.info("Power line frequency set to 50Hz (Vietnam)")
+            logger.info("Camera settings: Auto-exposure, Auto white balance, 50Hz power line frequency")
             return True
             
         except Exception as e:
@@ -236,7 +247,7 @@ class StereoCamera:
             "height": self.height,
             "fps": self.fps,
             "calibration_loaded": self.calibration_loaded,
-            "baseline": abs(self.T[0]) if self.calibration_loaded else None,
+            "baseline": float(abs(self.T[0])) if self.calibration_loaded else None,
             "left_camera": self.left_id,
             "right_camera": self.right_id
         }

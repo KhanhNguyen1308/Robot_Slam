@@ -59,10 +59,18 @@ class RobotWebServer:
         @self.app.route('/api/status')
         def get_status():
             """Get robot status"""
+            # Convert numpy arrays to lists for JSON serialization
+            slam_pose = None
+            if self.robot.slam_pose is not None:
+                if hasattr(self.robot.slam_pose, 'tolist'):
+                    slam_pose = self.robot.slam_pose.tolist()
+                else:
+                    slam_pose = self.robot.slam_pose
+            
             return jsonify({
                 "motor_controller": self.robot.motor_controller.get_stats(),
                 "slam": {
-                    "pose": self.robot.slam_pose.tolist() if self.robot.slam_pose is not None else None,
+                    "pose": slam_pose,
                     "tracking": self.robot.slam_tracking_state
                 },
                 "camera": self.camera.get_camera_info(),
@@ -126,6 +134,22 @@ class RobotWebServer:
             success = self.robot.emergency_stop()
             return jsonify({"success": success})
         
+        @self.app.route('/api/slam/diagnostics')
+        def slam_diagnostics():
+            """Get SLAM tracking diagnostics"""
+            diag = {
+                "tracking_state": self.robot.slam_tracking_state,
+                "frames_lost": self.robot.tracking_lost_count
+            }
+            
+            # Add visual odometry specific info
+            if hasattr(self.robot.slam, 'tracking_quality'):
+                diag["tracking_quality"] = float(self.robot.slam.tracking_quality)
+            if hasattr(self.robot.slam, 'frames_since_init'):
+                diag["frames_since_init"] = self.robot.slam.frames_since_init
+            
+            return jsonify(diag)
+        
         @self.app.route('/video/left')
         def video_left():
             """Stream left camera"""
@@ -163,6 +187,14 @@ class RobotWebServer:
             """Stream depth map"""
             return Response(
                 self._generate_stream('depth'),
+                mimetype='multipart/x-mixed-replace; boundary=frame'
+            )
+        
+        @self.app.route('/video/features')
+        def video_features():
+            """Stream with feature detection visualization"""
+            return Response(
+                self._generate_stream('features'),
                 mimetype='multipart/x-mixed-replace; boundary=frame'
             )
         
@@ -208,6 +240,9 @@ class RobotWebServer:
                         frame = np.zeros((480, 640, 3), dtype=np.uint8)
                         cv2.putText(frame, "No depth data", (200, 240),
                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                elif mode == 'features':
+                    # Show feature detection for tracking debugging
+                    frame = self._generate_feature_visualization()
                 else:
                     continue
                 
@@ -225,6 +260,89 @@ class RobotWebServer:
                 logger.error(f"Stream error: {e}")
             
             time.sleep(1.0 / self.stream_fps)
+    
+    def _generate_feature_visualization(self) -> np.ndarray:
+        """Generate feature detection visualization for debugging"""
+        try:
+            if self.robot.current_frame_left is None:
+                frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(frame, "No camera data", (200, 240),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                return frame
+            
+            # Get current frame
+            frame = self.robot.current_frame_left.copy()
+            
+            # Enhance image like visual odometry does
+            if len(frame.shape) == 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = frame
+            
+            # Apply CLAHE if visual odometry is active
+            if hasattr(self.robot.slam, 'clahe'):
+                enhanced = self.robot.slam.clahe.apply(gray)
+            else:
+                enhanced = gray
+            
+            # Detect features
+            if hasattr(self.robot.slam, 'detector'):
+                kp, des = self.robot.slam.detector.detectAndCompute(enhanced, None)
+            else:
+                # Fallback detector
+                detector = cv2.ORB_create(nfeatures=2000)
+                kp, des = detector.detectAndCompute(enhanced, None)
+            
+            # Convert to color for visualization
+            if len(frame.shape) == 2:
+                vis_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            else:
+                vis_frame = frame.copy()
+            
+            # Draw keypoints
+            if kp:
+                vis_frame = cv2.drawKeypoints(
+                    vis_frame,
+                    kp,
+                    None,
+                    color=(0, 255, 0),
+                    flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+                )
+            
+            # Add diagnostic info
+            status_color = (0, 255, 0) if self.robot.slam_tracking_state == "OK" else (0, 0, 255)
+            
+            # Background for text
+            cv2.rectangle(vis_frame, (5, 5), (400, 150), (0, 0, 0), -1)
+            
+            # Status text
+            info_text = [
+                f"Status: {self.robot.slam_tracking_state}",
+                f"Features: {len(kp) if kp else 0}",
+                f"Lost frames: {self.robot.tracking_lost_count}",
+            ]
+            
+            # Add tracking quality if available
+            if hasattr(self.robot.slam, 'tracking_quality'):
+                quality = int(self.robot.slam.tracking_quality * 100)
+                info_text.append(f"Quality: {quality}%")
+            
+            # Draw info
+            y = 30
+            for text in info_text:
+                color = status_color if "Status" in text else (255, 255, 255)
+                cv2.putText(vis_frame, text, (10, y),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                y += 30
+            
+            return vis_frame
+            
+        except Exception as e:
+            logger.error(f"Feature visualization error: {e}")
+            frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(frame, f"Error: {str(e)}", (50, 240),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            return frame
     
     def _add_overlay(self, frame: np.ndarray, mode: str) -> np.ndarray:
         """Add status overlay to frame"""
@@ -360,6 +478,15 @@ INDEX_HTML = """
             cursor: pointer;
             transition: background 0.3s;
         }
+        .btn {
+            background: #555;
+            color: white;
+            padding: 10px 20px;
+            margin: 5px;
+        }
+        .btn:hover {
+            background: #666;
+        }
         .btn-primary {
             background: #4CAF50;
             color: white;
@@ -409,14 +536,29 @@ INDEX_HTML = """
     <div class="container">
         <h1>🤖 Robot Control Panel</h1>
         
-        <div class="video-grid">
-            <div class="video-container">
-                <h3 style="text-align: center; margin: 10px;">Left Camera</h3>
-                <img src="/video/left" alt="Left Camera">
+        <div style="text-align: center; margin: 20px;">
+            <button class="btn" onclick="switchView('normal')">Normal View</button>
+            <button class="btn" onclick="switchView('stereo')">Stereo View</button>
+            <button class="btn" onclick="switchView('features')">🔍 Feature Tracking</button>
+            <button class="btn" onclick="switchView('obstacles')">Obstacles</button>
+            <button class="btn" onclick="switchView('depth')">Depth Map</button>
+        </div>
+        
+        <div id="video-display">
+            <div class="video-grid" id="normal-view">
+                <div class="video-container">
+                    <h3 style="text-align: center; margin: 10px;">Left Camera</h3>
+                    <img src="/video/left" alt="Left Camera">
+                </div>
+                <div class="video-container">
+                    <h3 style="text-align: center; margin: 10px;">Right Camera</h3>
+                    <img src="/video/right" alt="Right Camera">
+                </div>
             </div>
-            <div class="video-container">
-                <h3 style="text-align: center; margin: 10px;">Right Camera</h3>
-                <img src="/video/right" alt="Right Camera">
+            
+            <div class="video-container" id="single-view" style="display: none;">
+                <h3 id="view-title" style="text-align: center; margin: 10px;"></h3>
+                <img id="single-stream" src="" alt="Video Stream" style="max-width: 100%;">
             </div>
         </div>
         
@@ -515,6 +657,34 @@ INDEX_HTML = """
             fetch('/api/stop', {method: 'POST'})
                 .then(r => r.json())
                 .then(data => alert('Emergency stop activated'));
+        }
+        
+        // View switching
+        function switchView(view) {
+            const normalView = document.getElementById('normal-view');
+            const singleView = document.getElementById('single-view');
+            const singleStream = document.getElementById('single-stream');
+            const viewTitle = document.getElementById('view-title');
+            
+            if (view === 'normal') {
+                normalView.style.display = 'grid';
+                singleView.style.display = 'none';
+            } else {
+                normalView.style.display = 'none';
+                singleView.style.display = 'block';
+                
+                const viewConfig = {
+                    'stereo': {title: 'Stereo View', src: '/video/stereo'},
+                    'features': {title: '🔍 Feature Tracking Debug', src: '/video/features'},
+                    'obstacles': {title: 'Obstacle Detection', src: '/video/obstacles'},
+                    'depth': {title: 'Depth Map', src: '/video/depth'}
+                };
+                
+                if (viewConfig[view]) {
+                    viewTitle.textContent = viewConfig[view].title;
+                    singleStream.src = viewConfig[view].src;
+                }
+            }
         }
         
         // Status update

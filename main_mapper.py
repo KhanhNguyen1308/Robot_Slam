@@ -11,7 +11,7 @@ import signal
 import sys
 from typing import Optional
 
-from serial_controller import RP2040Controller, SafetyController
+from jetson_motor_controller import JetsonMotorController, SafetyController
 from stereo_camera import StereoCamera
 from orbslam_interface import ORBSLAM3, SimpleVisualOdometry
 from web_server import RobotWebServer
@@ -52,6 +52,8 @@ class RobotSystem:
         self.running = False
         self.slam_pose = np.eye(4)
         self.slam_tracking_state = "NOT_INITIALIZED"
+        self.tracking_lost_count = 0
+        self.last_tracking_log_time = 0
         
         # Current frames
         self.current_frame_left = None
@@ -87,15 +89,29 @@ class RobotSystem:
         logger.info("Initializing robot system...")
         
         try:
-            # 1. Initialize motor controller
-            logger.info("Connecting to RP2040...")
-            self.motor_controller = RP2040Controller(
-                port=self.config.get('serial_port', '/dev/ttyACM0'),
-                baudrate=self.config.get('serial_baudrate', 115200)
+            # 1. Initialize motor controller (GPIO-based)
+            logger.info("Initializing Jetson GPIO motor controller...")
+            self.motor_controller = JetsonMotorController(
+                left_step_pin=self.config.get('left_step_pin', 33),
+                left_dir_pin=self.config.get('left_dir_pin', 35),
+                left_enable_pin=self.config.get('left_enable_pin', 37),
+                left_ms1_pin=self.config.get('left_ms1_pin'),
+                left_ms2_pin=self.config.get('left_ms2_pin'),
+                left_ms3_pin=self.config.get('left_ms3_pin'),
+                right_step_pin=self.config.get('right_step_pin', 32),
+                right_dir_pin=self.config.get('right_dir_pin', 36),
+                right_enable_pin=self.config.get('right_enable_pin', 38),
+                right_ms1_pin=self.config.get('right_ms1_pin'),
+                right_ms2_pin=self.config.get('right_ms2_pin'),
+                right_ms3_pin=self.config.get('right_ms3_pin'),
+                wheel_diameter=self.config.get('wheel_diameter', 0.066),
+                wheel_base=self.config.get('wheel_base', 0.165),
+                steps_per_rev=self.config.get('steps_per_rev', 200),
+                microsteps=self.config.get('microsteps', 16)
             )
             
             if not self.motor_controller.connect():
-                logger.error("Failed to connect to RP2040")
+                logger.error("Failed to initialize motor controller")
                 return False
             
             # Wrap with safety controller
@@ -108,8 +124,8 @@ class RobotSystem:
             # 2. Initialize stereo camera
             logger.info("Initializing cameras...")
             self.camera = StereoCamera(
-                left_id=self.config.get('camera_left_id', 0),
-                right_id=self.config.get('camera_right_id', 1),
+                left_id=self.config.get('camera_left_id', 1),
+                right_id=self.config.get('camera_right_id', 0),
                 calibration_file=self.config.get('calibration_file', 'calibration.npz'),
                 width=self.config.get('camera_width', 1280),
                 height=self.config.get('camera_height', 720),
@@ -184,7 +200,7 @@ class RobotSystem:
             # 7. Initialize ORB-SLAM3 (optional)
             use_orbslam = self.config.get('use_orbslam', True)
             
-            if use_orbslam:
+            if use_orbslam and self.camera.calibration_loaded:
                 logger.info("Initializing ORB-SLAM3...")
                 
                 self.slam = ORBSLAM3(
@@ -209,7 +225,10 @@ class RobotSystem:
                 # Start SLAM
                 self.slam.start(use_viewer=self.config.get('orbslam_viewer', False))
             else:
-                logger.info("Using simple visual odometry")
+                if not self.camera.calibration_loaded:
+                    logger.warning("Cannot initialize ORB-SLAM3 without calibration - using simple visual odometry")
+                else:
+                    logger.info("Using simple visual odometry")
                 self.slam = SimpleVisualOdometry()
             
             # 8. Initialize web server
@@ -226,7 +245,9 @@ class RobotSystem:
             return True
             
         except Exception as e:
+            import traceback
             logger.error(f"Initialization failed: {e}")
+            logger.error(traceback.format_exc())
             return False
     
     def start(self):
@@ -329,6 +350,9 @@ class RobotSystem:
                             obstacles
                         )
                         
+                        # Scale velocity based on tracking quality
+                        linear, angular = self._scale_velocity_by_tracking(linear, angular)
+                        
                         # Send velocity commands
                         self.set_velocity(linear, angular)
                         
@@ -339,6 +363,10 @@ class RobotSystem:
                     # Autonomous obstacle avoidance (only if not mapping)
                     elif self.autonomous_mode and self.obstacle_avoidance:
                         linear, angular = self.obstacle_avoidance.compute_velocity(obstacles)
+                        
+                        # Scale velocity based on tracking quality
+                        linear, angular = self._scale_velocity_by_tracking(linear, angular)
+                        
                         self.set_velocity(linear, angular)
                 
                 # 4. Update IMU
@@ -366,12 +394,69 @@ class RobotSystem:
                 
                 if pose is not None:
                     self.slam_pose = pose
-                    self.slam_tracking_state = "OK"
+                    prev_state = self.slam_tracking_state
+                    
+                    # Determine tracking state based on quality
+                    if hasattr(self.slam, 'tracking_quality'):
+                        quality = self.slam.tracking_quality
+                        if quality > 0.5:
+                            self.slam_tracking_state = "OK"
+                        elif quality > 0.2:
+                            self.slam_tracking_state = "DEGRADED"
+                        else:
+                            self.slam_tracking_state = "POOR"
+                    else:
+                        self.slam_tracking_state = "OK"
+                    
+                    # Log when tracking is recovered
+                    if prev_state == "LOST" and self.tracking_lost_count > 0:
+                        quality_info = ""
+                        if hasattr(self.slam, 'tracking_quality'):
+                            quality_info = f", quality: {self.slam.tracking_quality:.2f}"
+                        logger.info(f"✓ Tracking recovered (was lost for {self.tracking_lost_count} frames{quality_info})")
+                        self.tracking_lost_count = 0
+                    
+                    # Slow down robot if tracking quality is poor
+                    if self.slam_tracking_state in ["DEGRADED", "POOR"]:
+                        if self.autonomous_mode or self.mapping_mode:
+                            # Reduce speed when tracking is poor
+                            if hasattr(self, '_speed_reduction_logged'):
+                                if not self._speed_reduction_logged:
+                                    logger.warning(f"⚠ Tracking quality poor ({quality:.2f}) - reducing speed")
+                                    self._speed_reduction_logged = True
+                            else:
+                                self._speed_reduction_logged = True
+                                logger.warning(f"⚠ Tracking quality poor ({quality:.2f}) - reducing speed")
+                    else:
+                        self._speed_reduction_logged = False
                     
                     # Log trajectory
                     self.trajectory.append((timestamp, pose.copy()))
                 else:
+                    prev_state = self.slam_tracking_state
                     self.slam_tracking_state = "LOST"
+                    self.tracking_lost_count += 1
+                    
+                    # Stop or slow down robot when tracking is lost
+                    if self.tracking_lost_count > 5 and (self.autonomous_mode or self.mapping_mode):
+                        logger.warning("⚠ Stopping robot - tracking lost for too long")
+                        self.emergency_stop()
+                        # Give system time to recover
+                        time.sleep(0.5)
+                    
+                    # Log when tracking is lost (throttled to every 5 seconds)
+                    current_time = time.time()
+                    if prev_state != "LOST":
+                        reason = "insufficient features"
+                        if hasattr(self.slam, 'frames_since_init'):
+                            reason += f" (frame {self.slam.frames_since_init})"
+                        if hasattr(self.slam, 'consecutive_failures'):
+                            reason += f", consecutive failures: {self.slam.consecutive_failures}"
+                        logger.warning(f"⚠ Tracking lost - {reason}")
+                        self.last_tracking_log_time = current_time
+                    elif current_time - self.last_tracking_log_time > 5.0:
+                        logger.warning(f"⚠ Still lost tracking ({self.tracking_lost_count} frames)")
+                        self.last_tracking_log_time = current_time
                 
                 # 6. Update FPS counter
                 self.frame_count += 1
@@ -392,6 +477,30 @@ class RobotSystem:
                 time.sleep(0.1)
         
         logger.info("Main loop stopped")
+    
+    def _scale_velocity_by_tracking(self, linear: float, angular: float) -> tuple:
+        """
+        Scale velocity commands based on tracking quality
+        Reduces speed when tracking is poor to improve feature detection
+        
+        Returns:
+            (scaled_linear, scaled_angular)
+        """
+        if self.slam_tracking_state == "OK":
+            return linear, angular
+        elif self.slam_tracking_state == "DEGRADED":
+            # Reduce to 50% speed
+            scale_factor = 0.5
+            return linear * scale_factor, angular * scale_factor
+        elif self.slam_tracking_state == "POOR":
+            # Reduce to 25% speed
+            scale_factor = 0.25
+            return linear * scale_factor, angular * scale_factor
+        elif self.slam_tracking_state == "LOST":
+            # Stop completely
+            return 0.0, 0.0
+        else:
+            return linear, angular
     
     def set_velocity(self, linear: float, angular: float) -> bool:
         """Set robot velocity"""
@@ -479,8 +588,8 @@ class RobotSystem:
         direction, confidence = self.obstacle_detector.get_safe_direction(self.current_obstacles)
         
         obstacles_data = [{
-            "distance": obs.distance,
-            "angle": obs.angle,
+            "distance": float(obs.distance),
+            "angle": float(obs.angle),
             "severity": obs.severity
         } for obs in self.current_obstacles[:5]]  # Top 5 closest
         
@@ -488,7 +597,7 @@ class RobotSystem:
             "obstacles": obstacles_data,
             "danger_zones": zones,
             "safe_direction": direction,
-            "confidence": confidence
+            "confidence": float(confidence)
         }
     
     def get_imu_data(self) -> dict:
@@ -505,13 +614,13 @@ class RobotSystem:
         
         return {
             "connected": True,
-            "pitch": self.imu_pitch,
-            "roll": self.imu_roll,
-            "accel_x": ax,
-            "accel_y": ay,
-            "accel_z": az,
-            "magnitude": self.imu.get_magnitude(),
-            "collision": self.collision_detected
+            "pitch": float(self.imu_pitch),
+            "roll": float(self.imu_roll),
+            "accel_x": float(ax),
+            "accel_y": float(ay),
+            "accel_z": float(az),
+            "magnitude": float(self.imu.get_magnitude()),
+            "collision": bool(self.collision_detected)
         }
     
     def get_trajectory(self) -> list:

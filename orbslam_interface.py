@@ -4,6 +4,7 @@ Wrapper for ORB-SLAM3 C++ executable with Python interface
 """
 import subprocess
 import numpy as np
+import cv2
 import os
 import threading
 import time
@@ -61,6 +62,10 @@ class ORBSLAM3:
         Args:
             camera_info: Dict with K1, D1, K2, D2, baseline, width, height, fps
         """
+        # Flatten distortion coefficients if needed
+        D1 = camera_info['D1'].flatten()
+        D2 = camera_info['D2'].flatten()
+        
         yaml_content = f"""
 %YAML:1.0
 
@@ -75,10 +80,10 @@ Camera1.fy: {camera_info['K1'][1, 1]}
 Camera1.cx: {camera_info['K1'][0, 2]}
 Camera1.cy: {camera_info['K1'][1, 2]}
 
-Camera1.k1: {camera_info['D1'][0]}
-Camera1.k2: {camera_info['D1'][1]}
-Camera1.p1: {camera_info['D1'][2]}
-Camera1.p2: {camera_info['D1'][3]}
+Camera1.k1: {D1[0]}
+Camera1.k2: {D1[1]}
+Camera1.p1: {D1[2]}
+Camera1.p2: {D1[3]}
 
 # Right Camera calibration
 Camera2.fx: {camera_info['K2'][0, 0]}
@@ -86,10 +91,10 @@ Camera2.fy: {camera_info['K2'][1, 1]}
 Camera2.cx: {camera_info['K2'][0, 2]}
 Camera2.cy: {camera_info['K2'][1, 2]}
 
-Camera2.k1: {camera_info['D2'][0]}
-Camera2.k2: {camera_info['D2'][1]}
-Camera2.p1: {camera_info['D2'][2]}
-Camera2.p2: {camera_info['D2'][3]}
+Camera2.k1: {D2[0]}
+Camera2.k2: {D2[1]}
+Camera2.p1: {D2[2]}
+Camera2.p2: {D2[3]}
 
 # Stereo baseline * fx
 Camera.bf: {abs(camera_info['baseline']) * camera_info['K1'][0, 0]}
@@ -283,48 +288,175 @@ class SimpleVisualOdometry:
         self.prev_left = None
         self.prev_right = None
         
-        # Feature detector
-        self.detector = cv2.ORB_create(nfeatures=500)
-        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        # Feature detector - more features, better detection
+        self.detector = cv2.ORB_create(
+            nfeatures=2000,
+            scaleFactor=1.2,
+            nlevels=8,
+            edgeThreshold=15,
+            firstLevel=0,
+            WTA_K=2,
+            scoreType=cv2.ORB_HARRIS_SCORE,
+            patchSize=31,
+            fastThreshold=10
+        )
+        
+        # Better matcher with ratio test
+        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        
+        # CLAHE for contrast enhancement
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         
         # Current pose
         self.pose = np.eye(4)
         
+        # Tracking state
+        self.tracking_quality = 0.0
+        self.frames_since_init = 0
+        self.consecutive_failures = 0
+        
+        # Motion prediction
+        self.last_motion = np.zeros(2)  # [dx, dy]
+        self.motion_history = []  # Rolling window for smoothing
+        self.max_history = 5
+        
+    def _enhance_image(self, img: np.ndarray) -> np.ndarray:
+        """Apply CLAHE for better feature detection"""
+        if len(img.shape) == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return self.clahe.apply(img)
+    
     def track(self, img_left: np.ndarray, img_right: np.ndarray) -> np.ndarray:
         """
         Track motion between frames
         
         Returns:
-            Current pose estimate
+            Current pose estimate or None if tracking completely lost
         """
+        # Enhance images for better feature detection
+        enhanced_left = self._enhance_image(img_left)
+        
         if self.prev_left is None:
-            self.prev_left = img_left
-            self.prev_right = img_right
+            self.prev_left = enhanced_left
+            self.prev_right = self._enhance_image(img_right)
+            self.frames_since_init = 0
+            self.consecutive_failures = 0
             return self.pose
+        
+        self.frames_since_init += 1
         
         # Detect and match features
         kp1, des1 = self.detector.detectAndCompute(self.prev_left, None)
-        kp2, des2 = self.detector.detectAndCompute(img_left, None)
+        kp2, des2 = self.detector.detectAndCompute(enhanced_left, None)
         
-        if des1 is not None and des2 is not None:
-            matches = self.matcher.match(des1, des2)
+        # Check if we have features - use motion prediction if not
+        if des1 is None or des2 is None or len(des1) < 5 or len(des2) < 5:
+            logger.warning(f"Very few features detected: {len(des1) if des1 is not None else 0}, {len(des2) if des2 is not None else 0}")
+            self.consecutive_failures += 1
             
-            # Estimate motion (simplified)
-            if len(matches) > 10:
-                # Extract matched points
-                pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
-                pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
+            # Use motion prediction from previous frames
+            if len(self.motion_history) > 0 and self.consecutive_failures < 10:
+                predicted_motion = np.mean(self.motion_history, axis=0)
+                self.pose[0, 3] += predicted_motion[0] * 0.0005
+                self.pose[1, 3] += predicted_motion[1] * 0.0005
+                self.tracking_quality = 0.3  # Low quality, but not lost
                 
-                # Estimate essential matrix (would need camera matrix)
-                # For now, just estimate 2D motion
-                dx = np.median(pts2[:, 0] - pts1[:, 0])
-                dy = np.median(pts2[:, 1] - pts1[:, 1])
-                
-                # Update pose (very rough estimate)
-                self.pose[0, 3] += dx * 0.001
-                self.pose[1, 3] += dy * 0.001
+                logger.info(f"Using motion prediction (consecutive failures: {self.consecutive_failures})")
+                self.prev_left = enhanced_left
+                self.prev_right = self._enhance_image(img_right)
+                return self.pose
+            else:
+                # Completely lost - too many failures
+                self.prev_left = enhanced_left
+                self.prev_right = self._enhance_image(img_right)
+                self.tracking_quality = 0.0
+                return None
         
-        self.prev_left = img_left
-        self.prev_right = img_right
+        # Match with ratio test
+        matches = self.matcher.knnMatch(des1, des2, k=2)
+        
+        # Apply Lowe's ratio test - adaptive threshold
+        ratio_threshold = 0.75 if self.consecutive_failures == 0 else 0.8
+        good_matches = []
+        for match_pair in matches:
+            if len(match_pair) == 2:
+                m, n = match_pair
+                if m.distance < ratio_threshold * n.distance:
+                    good_matches.append(m)
+        
+        # Adaptive minimum matches threshold
+        min_matches = 5 if self.consecutive_failures > 3 else 8
+        
+        # Need sufficient good matches for tracking
+        if len(good_matches) < min_matches:
+            logger.warning(f"Insufficient matches: {len(good_matches)}/{min_matches} required")
+            self.consecutive_failures += 1
+            
+            # Use motion prediction if we have history
+            if len(self.motion_history) > 0 and self.consecutive_failures < 10:
+                predicted_motion = np.mean(self.motion_history, axis=0)
+                self.pose[0, 3] += predicted_motion[0] * 0.0005
+                self.pose[1, 3] += predicted_motion[1] * 0.0005
+                self.tracking_quality = 0.2
+                
+                self.prev_left = enhanced_left
+                self.prev_right = self._enhance_image(img_right)
+                return self.pose
+            else:
+                self.prev_left = enhanced_left
+                self.prev_right = self._enhance_image(img_right)
+                self.tracking_quality = 0.0
+                return None
+        
+        # Extract matched points
+        pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+        pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+        
+        # Use RANSAC to filter outliers
+        if len(good_matches) >= 8:
+            E, mask = cv2.findEssentialMat(pts1, pts2, focal=1.0, pp=(0, 0), method=cv2.RANSAC, prob=0.999, threshold=1.0)
+            if mask is not None:
+                # Keep only inliers
+                pts1 = pts1[mask.ravel() == 1]
+                pts2 = pts2[mask.ravel() == 1]
+        
+        # Check if we still have enough points
+        if len(pts1) < 5:
+            self.prev_left = enhanced_left
+            self.prev_right = self._enhance_image(img_right)
+            return None
+        
+        # Estimate 2D motion with median (robust to outliers)
+        dx = np.median(pts2[:, 0] - pts1[:, 0])
+        dy = np.median(pts2[:, 1] - pts1[:, 1])
+        
+        # Only update pose if motion is reasonable (not a jump)
+        if abs(dx) < 100 and abs(dy) < 100:  # Sanity check on pixel movement
+            # Update pose (rough estimate)
+            self.pose[0, 3] += dx * 0.0005  # Scale factor
+            self.pose[1, 3] += dy * 0.0005
+            
+            # Update motion history for prediction
+            self.motion_history.append([dx, dy])
+            if len(self.motion_history) > self.max_history:
+                self.motion_history.pop(0)
+            self.last_motion = np.array([dx, dy])
+            
+            # Calculate tracking quality
+            self.tracking_quality = min(1.0, len(pts1) / 100.0)  # Normalize to 0-1
+            self.consecutive_failures = 0  # Reset failure counter
+        else:
+            # Large motion detected - might be unreliable
+            logger.warning(f"⚠ Large motion detected: dx={dx:.1f}, dy={dy:.1f} pixels - using prediction")
+            
+            # Use smoothed motion from history
+            if len(self.motion_history) > 0:
+                smooth_motion = np.mean(self.motion_history, axis=0)
+                self.pose[0, 3] += smooth_motion[0] * 0.0005
+                self.pose[1, 3] += smooth_motion[1] * 0.0005
+                self.tracking_quality = 0.4
+        
+        self.prev_left = enhanced_left
+        self.prev_right = self._enhance_image(img_right)
         
         return self.pose

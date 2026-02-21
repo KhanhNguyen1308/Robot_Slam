@@ -1,10 +1,37 @@
 # Configuration for Jetson Nano Robot Control System
 
-# Serial Communication
-serial:
-  port: "/dev/ttyACM0"  # RP2040 USB port
-  baudrate: 115200
-  timeout: 0.1
+# Motor Controller (Jetson GPIO with A4988 drivers)
+motor_controller:
+  # Left motor pins (BOARD numbering)
+  left_step_pin: 33    # Pin 33 (GPIO 13)
+  left_dir_pin: 35     # Pin 35 (GPIO 19)
+  left_enable_pin: 37  # Pin 37 (GPIO 26)
+  left_ms1_pin: 29     # Pin 29 (GPIO 5) - Optional
+  left_ms2_pin: 31     # Pin 31 (GPIO 6) - Optional
+  left_ms3_pin: 11     # Pin 11 (GPIO 17) - Optional
+  
+  # Right motor pins (BOARD numbering)
+  right_step_pin: 32   # Pin 32 (GPIO 12)
+  right_dir_pin: 36    # Pin 36 (GPIO 16)
+  right_enable_pin: 38 # Pin 38 (GPIO 20)
+  right_ms1_pin: 13    # Pin 13 (GPIO 27) - Optional
+  right_ms2_pin: 15    # Pin 15 (GPIO 22) - Optional
+  right_ms3_pin: 16    # Pin 16 (GPIO 23) - Optional
+  
+  # Stepper motor configuration
+  steps_per_rev: 200   # Full steps per revolution (1.8° steppers)
+  microsteps: 16       # Microstepping setting (1, 2, 4, 8, 16)
+
+# Robot Kinematics
+robot:
+  wheel_diameter: 0.066  # meters (66mm)
+  wheel_base: 0.165      # meters (165mm between wheels)
+  max_linear_speed: 0.5  # m/s
+  max_angular_speed: 2.0 # rad/s
+  
+  # Safety limits
+  watchdog_timeout: 0.5  # seconds
+  emergency_stop_enabled: true
 
 # Camera Settings
 camera:
@@ -24,16 +51,6 @@ orbslam:
   vocabulary: "/home/jetson/ORB_SLAM3/Vocabulary/ORBvoc.txt"
   settings: "./config/orbslam_stereo.yaml"
   mode: "stereo"  # stereo, monocular, rgbd
-
-# Robot Kinematics (must match RP2040 config)
-robot:
-  track_width: 0.275  # meters
-  max_linear_speed: 0.5  # m/s
-  max_angular_speed: 2.0  # rad/s
-  
-  # Safety limits
-  watchdog_timeout: 0.5  # seconds
-  emergency_stop_enabled: true
 
 # Web Server
 webserver:
