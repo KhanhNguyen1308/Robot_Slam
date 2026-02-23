@@ -1,0 +1,78 @@
+
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters
+#--------------------------------------------------------------------------------------------
+Camera.type: "PinHole"
+
+# Left Camera calibration
+Camera1.fx: 486.44056219613583
+Camera1.fy: 487.4446962178463
+Camera1.cx: 325.35454902832356
+Camera1.cy: 229.9893607931025
+
+Camera1.k1: 0.09146123548044494
+Camera1.k2: 0.13084884138512384
+Camera1.p1: -0.0002339069454322554
+Camera1.p2: 0.000711103003246288
+
+# Right Camera calibration
+Camera2.fx: 485.86325665108114
+Camera2.fy: 486.4398933561388
+Camera2.cx: 291.0015471983312
+Camera2.cy: 213.4479136355643
+
+Camera2.k1: 0.09668161379340671
+Camera2.k2: 0.11449915277980477
+Camera2.p1: -0.00020009268103025386
+Camera2.p2: -0.0005970080890320752
+
+# Stereo baseline * fx
+Camera.bf: [70.4418311]
+
+# Image resolution
+Camera.width: 1280
+Camera.height: 720
+
+# Frame rate
+Camera.fps: 30
+
+# Color order (0: BGR, 1: RGB)
+Camera.RGB: 0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 1200
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold (lower = more features)
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3
+Viewer.ViewpointX: 0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500
+
+#--------------------------------------------------------------------------------------------
+# Map Parameters
+#--------------------------------------------------------------------------------------------
+# Close/Far threshold for point culling
+ThDepth: 40.0

@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Robot Control Dashboard</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .panel {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            background-color: #fafafa;
+        }
+        .panel h2 {
+            margin-top: 0;
+            color: #555;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            background-color: #000;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .video-container img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-top: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s;
+        }
+        .btn-primary {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .btn-primary:hover {
+            background-color: #45a049;
+        }
+        .btn-danger {
+            background-color: #f44336;
+            color: white;
+        }
+        .btn-danger:hover {
+            background-color: #da190b;
+        }
+        .btn-warning {
+            background-color: #ff9800;
+            color: white;
+        }
+        .btn-warning:hover {
+            background-color: #e68900;
+        }
+        .status-item {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: white;
+            border-radius: 5px;
+            border-left: 4px solid #4CAF50;
+        }
+        .joystick {
+            width: 200px;
+            height: 200px;
+            border: 2px solid #333;
+            border-radius: 50%;
+            margin: 20px auto;
+            position: relative;
+            background-color: #e0e0e0;
+        }
+        .joystick-handle {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background-color: #4CAF50;
+            position: absolute;
+            top: 75px;
+            left: 75px;
+            cursor: move;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Autonomous Mapping Robot Dashboard</h1>
+        
+        <div class="grid">
+            <!-- Camera Feed -->
+            <div class="panel">
+                <h2>📷 Stereo Camera Feed</h2>
+                <div class="video-container">
+                    <img src="{{ url_for('video_feed') }}" alt="Stereo Camera">
+                </div>
+            </div>
+            
+            <!-- Map View -->
+            <div class="panel">
+                <h2>🗺️ Occupancy Grid Map</h2>
+                <div class="video-container">
+                    <img src="{{ url_for('map_feed') }}" alt="Map">
+                </div>
+            </div>
+            
+            <!-- Motor Controls -->
+            <div class="panel">
+                <h2>⚙️ Motor Control</h2>
+                <div class="controls">
+                    <button class="btn-primary" onclick="enableMotors()">Enable Motors</button>
+                    <button class="btn-warning" onclick="disableMotors()">Disable Motors</button>
+                    <button class="btn-danger" onclick="emergencyStop()">STOP</button>
+                </div>
+                
+                <h3>Manual Control</h3>
+                <div class="controls">
+                    <button class="btn-primary" onclick="moveForward()">↑ Forward</button>
+                    <button class="btn-primary" onclick="moveBackward()">↓ Backward</button>
+                    <button class="btn-primary" onclick="turnLeft()">← Left</button>
+                    <button class="btn-primary" onclick="turnRight()">→ Right</button>
+                    <button class="btn-warning" onclick="stopMoving()">Stop</button>
+                </div>
+                
+                <div id="motor-status" class="status-item">
+                    <strong>Status:</strong> <span id="motor-state">Unknown</span>
+                </div>
+            </div>
+            
+            <!-- Exploration Control -->
+            <div class="panel">
+                <h2>🎯 Autonomous Exploration</h2>
+                <div class="controls">
+                    <button class="btn-primary" onclick="startExploration()">Start Exploration</button>
+                    <button class="btn-danger" onclick="stopExploration()">Stop Exploration</button>
+                </div>
+                
+                <div class="controls">
+                    <button class="btn-warning" onclick="saveMap()">Save Map</button>
+                    <button class="btn-warning" onclick="loadMap()">Load Map</button>
+                </div>
+                
+                <div id="exploration-status" class="status-item">
+                    <div><strong>Mode:</strong> <span id="exp-mode">Idle</span></div>
+                    <div><strong>Coverage:</strong> <span id="coverage">0%</span></div>
+                    <div><strong>Frontiers:</strong> <span id="frontiers">0</span></div>
+                </div>
+            </div>
+            
+            <!-- Robot Status -->
+            <div class="panel">
+                <h2>📊 Robot Status</h2>
+                <div id="pose-status" class="status-item">
+                    <div><strong>X:</strong> <span id="pose-x">0.00</span> m</div>
+                    <div><strong>Y:</strong> <span id="pose-y">0.00</span> m</div>
+                    <div><strong>θ:</strong> <span id="pose-theta">0.00</span> rad</div>
+                </div>
+                
+                <div id="slam-status" class="status-item">
+                    <div><strong>SLAM State:</strong> <span id="slam-state">Unknown</span></div>
+                    <div><strong>Frames:</strong> <span id="slam-frames">0</span></div>
+                    <div><strong>Map Points:</strong> <span id="map-points">0</span></div>
+                </div>
+            </div>
+            
+            <!-- System Info -->
+            <div class="panel">
+                <h2>💻 System Information</h2>
+                <div id="system-status" class="status-item">
+                    <div><strong>Commands Sent:</strong> <span id="cmd-count">0</span></div>
+                    <div><strong>Errors:</strong> <span id="error-count">0</span></div>
+                    <div><strong>Uptime:</strong> <span id="uptime">0s</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Update status every second
+        setInterval(updateStatus, 1000);
+        
+        function updateStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    // Motor status
+                    document.getElementById('motor-state').textContent = 
+                        data.motor.enabled ? 'Enabled' : 'Disabled';
+                    document.getElementById('cmd-count').textContent = data.motor.commands_sent || 0;
+                    document.getElementById('error-count').textContent = data.motor.errors || 0;
+                    
+                    // SLAM status
+                    document.getElementById('slam-state').textContent = 
+                        data.slam.tracking_state || 'Unknown';
+                    document.getElementById('slam-frames').textContent = 
+                        data.slam.frames_processed || 0;
+                    document.getElementById('map-points').textContent = 
+                        data.slam.map_points || 0;
+                    
+                    // Mapper status
+                    document.getElementById('exp-mode').textContent = 
+                        data.mapper.mode || 'idle';
+                    document.getElementById('coverage').textContent = 
+                        (data.mapper.coverage_percent || 0).toFixed(1) + '%';
+                    document.getElementById('frontiers').textContent = 
+                        data.mapper.frontiers_visited || 0;
+                });
+            
+            // Update pose
+            fetch('/api/pose')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('pose-x').textContent = data.x.toFixed(2);
+                    document.getElementById('pose-y').textContent = data.y.toFixed(2);
+                    document.getElementById('pose-theta').textContent = data.theta.toFixed(2);
+                });
+        }
+        
+        function enableMotors() {
+            fetch('/api/motor/enable', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => console.log('Motors enabled:', data));
+        }
+        
+        function disableMotors() {
+            fetch('/api/motor/disable', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => console.log('Motors disabled:', data));
+        }
+        
+        function emergencyStop() {
+            fetch('/api/motor/stop', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => console.log('Emergency stop:', data));
+        }
+        
+        function sendVelocity(linear, angular) {
+            fetch('/api/motor/velocity', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({linear: linear, angular: angular})
+            });
+        }
+        
+        function moveForward() { sendVelocity(0.2, 0); }
+        function moveBackward() { sendVelocity(-0.2, 0); }
+        function turnLeft() { sendVelocity(0, 1.0); }
+        function turnRight() { sendVelocity(0, -1.0); }
+        function stopMoving() { sendVelocity(0, 0); }
+        
+        function startExploration() {
+            fetch('/api/exploration/start', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => console.log('Exploration started:', data));
+        }
+        
+        function stopExploration() {
+            fetch('/api/exploration/stop', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => console.log('Exploration stopped:', data));
+        }
+        
+        function saveMap() {
+            const filename = prompt('Enter filename:', 'room_map.npz');
+            if (filename) {
+                fetch('/api/map/save', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({filepath: filename})
+                })
+                .then(response => response.json())
+                .then(data => alert('Map saved: ' + data.filepath));
+            }
+        }
+        
+        function loadMap() {
+            const filename = prompt('Enter filename:', 'room_map.npz');
+            if (filename) {
+                fetch('/api/map/load', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({filepath: filename})
+                })
+                .then(response => response.json())
+                .then(data => alert('Map loaded: ' + data.filepath));
+            }
+        }
+        
+        // Keyboard controls
+        document.addEventListener('keydown', (e) => {
+            switch(e.key) {
+                case 'ArrowUp': moveForward(); break;
+                case 'ArrowDown': moveBackward(); break;
+                case 'ArrowLeft': turnLeft(); break;
+                case 'ArrowRight': turnRight(); break;
+                case ' ': stopMoving(); break;
+            }
+        });
+    </script>
+</body>
+</html>
