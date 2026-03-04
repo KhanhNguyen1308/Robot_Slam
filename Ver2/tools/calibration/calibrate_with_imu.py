@@ -4,6 +4,9 @@ Advanced Motor Calibration Using MPU6050 IMU
 Accurately measures actual rotation angle to calibrate wheel_base
 """
 import sys
+import os
+# Allow running from any working directory — project root is 2 levels up
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 import time
 import logging
 import math

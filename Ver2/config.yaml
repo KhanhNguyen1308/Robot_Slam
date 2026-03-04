@@ -1,0 +1,69 @@
+# Robot configuration
+# Edit this file to match your hardware without touching Python source code.
+
+camera:
+  left_id: 1
+  right_id: 0
+  calibration_file: data/calibration.npz
+  stereo_baseline: 0.14       # metres — must match physical hardware
+  width: 640
+  height: 480
+  fps: 30
+  use_manual_settings: true   # disable auto-exposure / auto-white-balance
+  manual_exposure: -5
+  manual_gain: 55
+
+slam:
+  use_orbslam3: false          # set true only when C++ bindings are built
+  orb_slam_path: /home/jetson/ORB_SLAM3
+  use_viewer: false
+
+motor:
+  left_step_pin: 33
+  left_dir_pin: 35
+  left_enable_pin: 37
+  left_ms1_pin: 29
+  left_ms2_pin: 31
+  left_ms3_pin: 11
+  right_step_pin: 32
+  right_dir_pin: 36
+  right_enable_pin: 38
+  right_ms1_pin: 13
+  right_ms2_pin: 15
+  right_ms3_pin: 16
+  # Custom sprocket: outer diameter 69.84 mm, track separation 284.5 mm
+  wheel_diameter: 0.06984      # metres (69.84 mm outer diameter from CAD)
+  wheel_base: 0.2845           # metres (284.5 mm track centre-to-centre)
+  steps_per_rev: 200
+  microsteps: 16
+  # Direct drive: motor shaft connects directly to 20-tooth sprocket (no intermediate gears)
+  gear_ratio: 1.0              # = 1:1 (direct drive)
+  max_linear_speed: 0.3        # m/s
+  max_angular_speed: 1.5       # rad/s
+
+mapping:
+  grid_width: 10.0             # metres
+  grid_height: 10.0            # metres
+  resolution: 0.05             # metres per cell
+
+obstacle_detection:
+  min_safe_distance: 0.3       # metres
+  critical_distance: 0.15      # metres
+  detection_width: 0.5         # metres (robot width + safety margin)
+  max_range: 2.0               # metres
+
+imu:
+  bus_number: 1
+  address: 0x68
+  gyro_range: 250              # deg/s
+  accel_range: 2               # g
+  use_ekf: true
+  fusion_weight: 0.3
+
+robot:
+  radius: 0.2                  # metres — used for A* obstacle inflation
+
+web_server:
+  host: "0.0.0.0"
+  port: 5000
+  debug: false

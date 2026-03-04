@@ -71,47 +71,46 @@ class ExtendedKalmanFilter:
         # Update covariance
         self.P = F @ self.P @ F.T + self.Q
     
-    def update_visual(self, measurement: Tuple[float, float, float]):
+    def update_visual(self, measurement: Tuple[float, float, float],
+                      R_override: Optional[np.ndarray] = None):
         """
-        Update step using visual odometry measurement
-        
+        Update step using visual odometry measurement.
+
         Args:
             measurement: (x, y, theta) from visual SLAM
+            R_override: Optional measurement noise matrix.  When supplied,
+                        self.R_visual is NOT mutated, making concurrent
+                        callers safe.
         """
-        # Measurement model: H = [1, 0, 0, 0, 0, 0]
-        #                         [0, 1, 0, 0, 0, 0]
-        #                         [0, 0, 1, 0, 0, 0]
         H = np.zeros((3, 6))
         H[0, 0] = 1
         H[1, 1] = 1
         H[2, 2] = 1
-        
-        # Measurement
+
         z = np.array(measurement)
-        
-        # Predicted measurement
         h = self.state[:3]
-        
-        # Innovation
+
+        # Innovation with angle normalisation
         y = z - h
-        
-        # Normalize angle difference
         y[2] = np.arctan2(np.sin(y[2]), np.cos(y[2]))
-        
-        # Innovation covariance
-        S = H @ self.P @ H.T + self.R_visual
-        
-        # Kalman gain
-        K = self.P @ H.T @ np.linalg.inv(S)
-        
-        # Update state
+
+        # Use caller-supplied noise matrix if provided (avoids mutating self.R_visual)
+        R = R_override if R_override is not None else self.R_visual
+
+        # Innovation covariance — np.linalg.solve is more stable than inv
+        S = H @ self.P @ H.T + R
+        K = self.P @ H.T @ np.linalg.solve(S, np.eye(S.shape[0]))
+
+        # State update
         self.state = self.state + K @ y
-        
-        # Normalize theta
         self.state[2] = np.arctan2(np.sin(self.state[2]), np.cos(self.state[2]))
-        
-        # Update covariance
-        self.P = (np.eye(6) - K @ H) @ self.P
+
+        # Joseph stabilised covariance update (keeps P symmetric + positive-definite)
+        IKH = np.eye(6) - K @ H
+        self.P = IKH @ self.P @ IKH.T + K @ R @ K.T
+        # Enforce symmetry and add small regularisation against floating-point drift
+        self.P = (self.P + self.P.T) * 0.5
+        self.P += np.eye(6) * 1e-9
     
     def get_pose(self) -> Tuple[float, float, float]:
         """Get current pose estimate (x, y, theta)"""
@@ -184,12 +183,10 @@ class IMUVisualFusion:
             self.current_visual_quality = quality
             
             if self.use_ekf and self.ekf:
-                # Update EKF with visual measurement
-                # Adjust measurement noise based on quality
-                original_R = self.ekf.R_visual.copy()
-                self.ekf.R_visual = original_R * (2.0 - quality)  # Lower quality = higher noise
-                self.ekf.update_visual((x, y, theta))
-                self.ekf.R_visual = original_R  # Restore
+                # Scale measurement noise by tracking quality:
+                # lower quality → higher noise → EKF trusts visual odometry less
+                R_scaled = self.ekf.R_visual * (2.0 - quality)
+                self.ekf.update_visual((x, y, theta), R_override=R_scaled)
                 self.x, self.y, self.theta = self.ekf.get_pose()
             else:
                 # Simple update (weighted average if IMU data is recent)

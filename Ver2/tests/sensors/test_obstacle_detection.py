@@ -6,6 +6,9 @@ Demonstrates obstacle avoidance without full robot system
 import numpy as np
 import cv2
 import sys
+import os
+# Allow running from any working directory — project root is 2 levels up
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 import time
 from obstacle_detector import ObstacleDetector
 

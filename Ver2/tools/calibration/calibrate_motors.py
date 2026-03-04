@@ -4,6 +4,9 @@ Test Motor Calibration - Find correct gear ratio for tracks
 Helps calibrate wheel_diameter and gear_ratio for accurate odometry
 """
 import sys
+import os
+# Allow running from any working directory — project root is 2 levels up
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 import time
 import logging
 

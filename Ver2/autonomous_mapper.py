@@ -7,6 +7,8 @@ import cv2
 import logging
 import time
 import threading
+import math
+import heapq
 from typing import Optional, Tuple, List, Dict
 from collections import deque
 from obstacle_detector import ObstacleDetector
@@ -138,26 +140,25 @@ class OccupancyGrid:
     
     def get_frontiers(self) -> List[Tuple[int, int]]:
         """
-        Find frontier cells (boundary between known free and unknown space)
-        
+        Find frontier cells (boundary between known free and unknown space).
+        Uses vectorized numpy/cv2 operations instead of Python loops —
+        ~100x faster on a 200x200 grid.
+
         Returns:
             List of (grid_x, grid_y) frontier cells
         """
-        frontiers = []
-        
-        for y in range(1, self.grid_height - 1):
-            for x in range(1, self.grid_width - 1):
-                # Check if cell is free
-                if self.grid[y, x] == 0:
-                    # Check if any neighbor is unknown
-                    neighbors = [
-                        self.grid[y-1, x], self.grid[y+1, x],
-                        self.grid[y, x-1], self.grid[y, x+1]
-                    ]
-                    if -1 in neighbors:
-                        frontiers.append((x, y))
-        
-        return frontiers
+        free    = (self.grid == 0).astype(np.uint8)
+        unknown = (self.grid == -1).astype(np.uint8)
+
+        # Dilate unknown mask by 1 pixel so every cell adjacent to unknown
+        # space becomes an "unknown-neighbour"
+        kernel = np.ones((3, 3), np.uint8)
+        unknown_dilated = cv2.dilate(unknown, kernel)
+
+        # Frontier = free AND touching unknown
+        frontier_mask = free & unknown_dilated
+        ys, xs = np.where(frontier_mask)
+        return list(zip(xs.tolist(), ys.tolist()))
     
     def get_image(self) -> np.ndarray:
         """Get grid as image for visualization"""
@@ -179,10 +180,13 @@ class ExplorationPlanner:
     Frontier-based exploration planner
     """
     
-    def __init__(self, occupancy_grid: OccupancyGrid):
+    def __init__(self, occupancy_grid: OccupancyGrid, robot_radius: float = 0.2):
         self.grid = occupancy_grid
         self.current_goal = None
-        self.goal_tolerance = 0.2  # meters
+        self.goal_tolerance = 0.2       # metres
+        self.robot_radius = robot_radius  # metres — used for obstacle inflation in A*
+        self.current_path: List[Tuple[float, float]] = []
+        self.path_index: int = 0
         
     def find_nearest_frontier(self, robot_x: float, robot_y: float) -> Optional[Tuple[float, float]]:
         """
@@ -225,17 +229,77 @@ class ExplorationPlanner:
         
         return dist < self.goal_tolerance
     
-    def plan_path(self, start: Tuple[float, float], 
+    def plan_path(self, start: Tuple[float, float],
                   goal: Tuple[float, float]) -> Optional[List[Tuple[float, float]]]:
         """
-        Simple path planning (A* or direct navigation)
-        
+        A* path planning on the occupancy grid with obstacle inflation.
+
+        Unknown cells (grid == -1) are traversable but carry an extra cost so
+        the robot prefers known free space when available.
+
         Returns:
-            List of waypoints from start to goal
+            Ordered list of (world_x, world_y) waypoints, or None if blocked.
         """
-        # For now, return direct path
-        # In production, implement A* or similar
-        return [start, goal]
+        # --- grid coordinates ---
+        sx, sy = self.grid.world_to_grid(start[0], start[1])
+        gx, gy = self.grid.world_to_grid(goal[0],  goal[1])
+        sx = int(np.clip(sx, 0, self.grid.grid_width  - 1))
+        sy = int(np.clip(sy, 0, self.grid.grid_height - 1))
+        gx = int(np.clip(gx, 0, self.grid.grid_width  - 1))
+        gy = int(np.clip(gy, 0, self.grid.grid_height - 1))
+
+        # --- inflate occupied cells by robot radius ---
+        inflation_px = max(1, int(self.robot_radius / self.grid.resolution))
+        occupied = (self.grid.grid == 100).astype(np.uint8)
+        kernel   = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * inflation_px + 1, 2 * inflation_px + 1)
+        )
+        inflated = cv2.dilate(occupied, kernel).astype(bool)
+
+        # --- A* search (8-connected) ---
+        open_set: List = []   # heap entries: (f, g, x, y)
+        heapq.heappush(open_set, (0.0, 0.0, sx, sy))
+        came_from: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        g_cost:    Dict[Tuple[int, int], float]           = {(sx, sy): 0.0}
+
+        def heuristic(x: int, y: int) -> float:
+            # Chebyshev distance — consistent with 8-connected movement
+            return float(max(abs(x - gx), abs(y - gy)))
+
+        while open_set:
+            _, g, cx, cy = heapq.heappop(open_set)
+
+            if (cx, cy) == (gx, gy):          # goal reached — reconstruct path
+                path: List[Tuple[float, float]] = []
+                node: Tuple[int, int] = (cx, cy)
+                while node in came_from:
+                    wx, wy = self.grid.grid_to_world(node[0], node[1])
+                    path.append((wx, wy))
+                    node = came_from[node]
+                wx, wy = self.grid.grid_to_world(sx, sy)
+                path.append((wx, wy))
+                path.reverse()
+                return path
+
+            if g > g_cost.get((cx, cy), float('inf')):
+                continue  # stale heap entry
+
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1),
+                           (-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                nx, ny = cx + dx, cy + dy
+                if not self.grid.is_valid(nx, ny):
+                    continue
+                if inflated[ny, nx]:
+                    continue  # inside obstacle inflation zone
+                extra = 2.0 if self.grid.grid[ny, nx] == -1 else 0.0
+                new_g = g + math.sqrt(dx * dx + dy * dy) + extra
+                if new_g < g_cost.get((nx, ny), float('inf')):
+                    g_cost[(nx, ny)] = new_g
+                    heapq.heappush(open_set, (new_g + heuristic(nx, ny), new_g, nx, ny))
+                    came_from[(nx, ny)] = (cx, cy)
+
+        logger.warning(f"A* found no path from {start} to {goal}")
+        return None
 
 
 class AutonomousMapper:
@@ -244,18 +308,23 @@ class AutonomousMapper:
     Coordinates SLAM, mapping, and exploration
     """
     
-    def __init__(self, 
+    def __init__(self,
                  motor_controller,
                  slam_system,
                  occupancy_grid: OccupancyGrid,
                  obstacle_detector: Optional[ObstacleDetector] = None,
                  max_linear_speed: float = 0.2,
-                 max_angular_speed: float = 1.0):
-        
+                 max_angular_speed: float = 1.0,
+                 camera_matrix: Optional[np.ndarray] = None,
+                 baseline: float = 0.14,
+                 robot_radius: float = 0.2):
+
         self.motor = motor_controller
         self.slam = slam_system
         self.grid = occupancy_grid
-        self.planner = ExplorationPlanner(occupancy_grid)
+        self.camera_matrix = camera_matrix  # for correct depth in update_map_from_stereo
+        self.baseline = baseline            # stereo baseline in metres
+        self.planner = ExplorationPlanner(occupancy_grid, robot_radius=robot_radius)
         
         # Obstacle detection
         self.obstacle_detector = obstacle_detector or ObstacleDetector()
@@ -335,22 +404,49 @@ class AutonomousMapper:
                     
                     self.x, self.y, self.theta = new_x, new_y, new_theta
                 
-                # Check if current goal reached
+                # Advance to next path waypoint when current one is reached
+                if (self.planner.current_path and
+                        self.planner.path_index < len(self.planner.current_path) - 1):
+                    wp = self.planner.current_path[self.planner.path_index]
+                    wp_dist = math.sqrt((self.x - wp[0])**2 + (self.y - wp[1])**2)
+                    if wp_dist < self.planner.goal_tolerance:
+                        self.planner.path_index += 1
+                        logger.debug(
+                            f"Waypoint reached, advancing to index {self.planner.path_index}"
+                        )
+
+                # Check if the FINAL goal is reached — find the next frontier
                 if self.planner.is_goal_reached(self.x, self.y):
-                    # Find new frontier
                     goal = self.planner.find_nearest_frontier(self.x, self.y)
-                    
+
                     if goal is None:
                         logger.info("Exploration complete - no more frontiers")
                         self.stop_exploration()
                         break
-                    
+
                     self.planner.current_goal = goal
                     self.frontiers_visited += 1
-                    logger.info(f"New goal: ({goal[0]:.2f}, {goal[1]:.2f})")
-                
-                # Navigate towards goal
-                if self.planner.current_goal:
+                    logger.info(f"New frontier goal: ({goal[0]:.2f}, {goal[1]:.2f})")
+
+                    # Plan A* path to the new frontier
+                    path = self.planner.plan_path((self.x, self.y), goal)
+                    if path and len(path) > 1:
+                        self.planner.current_path = path
+                        self.planner.path_index = 1  # index 0 is current position
+                        logger.info(f"A* path planned: {len(path)} waypoints")
+                    else:
+                        # No path found — navigate directly
+                        self.planner.current_path = [goal]
+                        self.planner.path_index = 0
+                        logger.warning("No A* path found, navigating directly to goal")
+
+                # Navigate towards current waypoint (or final goal as fallback)
+                if (self.planner.current_path and
+                        self.planner.path_index < len(self.planner.current_path)):
+                    self._navigate_to_goal(
+                        self.planner.current_path[self.planner.path_index]
+                    )
+                elif self.planner.current_goal:
                     self._navigate_to_goal(self.planner.current_goal)
                 
                 time.sleep(0.1)  # 10 Hz control loop
@@ -426,11 +522,7 @@ class AutonomousMapper:
     
     def _normalize_angle(self, angle: float) -> float:
         """Normalize angle to [-pi, pi]"""
-        while angle > np.pi:
-            angle -= 2 * np.pi
-        while angle < -np.pi:
-            angle += 2 * np.pi
-        return angle
+        return (angle + math.pi) % (2 * math.pi) - math.pi
     
     def update_obstacle_detection(self,
                                   disparity: np.ndarray,
@@ -483,19 +575,25 @@ class AutonomousMapper:
         height, width = disparity.shape
         ranges = []
         angles = []
-        
-        # Sample horizontal line through image center
+
+        # Derive focal length and principal point from stored camera matrix
+        if self.camera_matrix is not None:
+            fx           = float(self.camera_matrix[0, 0])
+            cx_principal = float(self.camera_matrix[0, 2])
+        else:
+            fx           = 500.0          # generic fallback
+            cx_principal = width / 2.0
+
+        # Sample horizontal band around image centre
         cy = height // 2
-        for cx in range(0, width, 10):  # Sample every 10 pixels
-            d = disparity[cy, cx]
+        for cx in range(0, width, 10):  # every 10 pixels
+            d = float(disparity[cy, cx])
             if d > 0:
-                # Calculate distance (simplified)
-                # Would need proper depth calculation from disparity
-                depth = 1.0 / (d + 1e-6)  # Placeholder
-                
-                if 0.1 < depth < 3.0:  # Valid range
-                    # Calculate angle
-                    angle = (cx - width/2) / width * 1.2  # ~60 degree FOV
+                # Correct stereo depth formula: depth = (fx * baseline) / disparity
+                depth = (fx * self.baseline) / (d + 1e-6)
+                if 0.1 < depth < 3.0:  # valid indoor range
+                    # Horizontal angle from the principal point
+                    angle = math.atan2(cx - cx_principal, fx)
                     ranges.append(depth)
                     angles.append(angle)
         

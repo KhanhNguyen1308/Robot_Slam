@@ -240,7 +240,8 @@ if __name__ == "__main__":
     print("\n*** STEREO CAMERA CALIBRATION CHECKER ***\n")
     
     # Check for calibration file
-    cal_file = 'calibration.npz'
+    _root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+    cal_file = os.path.join(_root, 'data', 'calibration.npz')
     if len(sys.argv) > 1:
         cal_file = sys.argv[1]
     

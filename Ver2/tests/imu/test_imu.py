@@ -4,6 +4,9 @@ Test script for MPU6050 IMU
 Verifies I2C connection, calibration, and data reading
 """
 import sys
+import os
+# Allow running from any working directory — project root is 2 levels up
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 import time
 import numpy as np
 import logging

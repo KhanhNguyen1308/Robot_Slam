@@ -371,7 +371,13 @@ class SimpleVisualSLAM:
         # Scale tracking for fallback
         self.last_valid_scale = 0.01  # Default ~1cm (conservative for static/slow motion)
         self.scale_history = []  # Track scale estimates
-        
+
+        # Statistics — mirrors ORBSLAM3Wrapper interface so get_stats() is consistent
+        self.frames_processed = 0
+        self.tracking_lost_count = 0
+        self.tracking_quality = 0.0
+        self.last_num_matches = 0
+
         self.initialized = False
         
     def initialize(self, left: np.ndarray, right: np.ndarray):
@@ -416,7 +422,10 @@ class SimpleVisualSLAM:
             
             # Detect features in current frame
             kp, desc = self.detector.detectAndCompute(left, None)
-            
+            # Cache for _estimate_scale_from_stereo so it doesn't re-detect
+            self._current_kp   = kp
+            self._current_desc = desc
+
             if desc is None or self.prev_desc is None:
                 logger.warning("No descriptors available for matching")
                 return self.pose
@@ -446,6 +455,7 @@ class SimpleVisualSLAM:
                 logger.warning(f"Not enough matches for pose estimation: {len(good_matches)}")
                 # When visual tracking fails, maintain last known pose
                 # but mark tracking as degraded for sensor fusion to rely more on IMU
+                self.tracking_lost_count += 1
                 self.prev_frame = left.copy()
                 self.prev_kp = kp
                 self.prev_desc = desc
@@ -479,7 +489,10 @@ class SimpleVisualSLAM:
                 _, R, t, mask = cv2.recoverPose(E, pts1, pts2, self.K, mask=mask)
                 
                 # CRITICAL: Estimate real-world scale from stereo depth
-                scale = self._estimate_scale_from_stereo(left, right, pts1, pts2, good_matches, mask)
+                scale = self._estimate_scale_from_stereo(
+                    left, right, pts1, pts2, good_matches, mask,
+                    kp_left=kp, desc_left=desc
+                )
                 
                 if scale is None or scale <= 0:
                     # Cannot estimate scale - use last valid scale as fallback
@@ -527,44 +540,46 @@ class SimpleVisualSLAM:
             self.prev_frame = left.copy()
             self.prev_kp = kp
             self.prev_desc = desc
-            
+            self.frames_processed += 1
             return self.pose
-            
+
         except Exception as e:
             logger.error(f"Tracking error: {e}", exc_info=True)
             return self.pose
     
-    def _estimate_scale_from_stereo(self, 
-                                    left: np.ndarray, 
+    def _estimate_scale_from_stereo(self,
+                                    left: np.ndarray,
                                     right: np.ndarray,
                                     pts1: np.ndarray,
                                     pts2: np.ndarray,
                                     matches: list,
-                                    mask: np.ndarray) -> Optional[float]:
+                                    mask: np.ndarray,
+                                    kp_left=None,
+                                    desc_left=None) -> Optional[float]:
         """
-        Estimate real-world scale of motion using stereo depth
-        
-        This solves the scale ambiguity problem in monocular VO by using
-        stereo triangulation to get absolute depth measurements.
-        
+        Estimate real-world scale of motion using stereo depth.
+        Solves the scale ambiguity in monocular VO via stereo triangulation.
+
         Args:
             left: Current left frame
-            right: Current right frame  
+            right: Current right frame
             pts1: Previous frame points
             pts2: Current frame points
             matches: Feature matches
             mask: Inlier mask from RANSAC
-            
+            kp_left: Pre-computed left keypoints (avoids redundant detection)
+            desc_left: Pre-computed left descriptors
         Returns:
-            Scale factor (real-world meters per normalized unit)
+            Scale factor (real-world metres per normalised unit)
         """
         try:
             # Detect features in right frame for stereo matching
             kp_right, desc_right = self.detector.detectAndCompute(right, None)
-            
-            # Also detect in current left
-            kp_left, desc_left = self.detector.detectAndCompute(left, None)
-            
+
+            # Use cached left features if available; re-detect only as fallback
+            if kp_left is None or desc_left is None:
+                kp_left, desc_left = self.detector.detectAndCompute(left, None)
+
             if desc_left is None or desc_right is None:
                 logger.debug("No features for scale estimation")
                 return None

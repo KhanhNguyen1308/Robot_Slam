@@ -3,6 +3,9 @@
 Debug Motor Movement - Count actual steps and measure distance
 """
 import sys
+import os
+# Allow running from any working directory — project root is 2 levels up
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 import time
 import logging
 
@@ -26,19 +29,19 @@ def debug_linear_motion():
     # Test configurations
     configs = [
         {
-            'name': 'Current (38/18)',
-            'wheel_diameter': 0.066,
-            'gear_ratio': 38/18
+            'name': 'Current (direct drive, 1:1)',
+            'wheel_diameter': 0.06984,
+            'gear_ratio': 1.0  # Direct drive: motor -> 20-tooth sprocket, no intermediate gears
         },
         {
-            'name': 'Test 3x (114/18)', 
-            'wheel_diameter': 0.066,
-            'gear_ratio': 114/18  # 3x current
+            'name': 'Test 2x gearing',
+            'wheel_diameter': 0.06984,
+            'gear_ratio': 2.0
         },
         {
             'name': 'Test smaller wheel (20mm)',
             'wheel_diameter': 0.020,
-            'gear_ratio': 38/18
+            'gear_ratio': 1.0  # Direct drive
         }
     ]
     

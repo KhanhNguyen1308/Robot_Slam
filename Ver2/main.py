@@ -10,6 +10,11 @@ import time
 import signal
 import threading
 import numpy as np
+try:
+    import yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,7 +34,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('robot.log'),
+        logging.FileHandler('logs/robot.log'),
         logging.StreamHandler()
     ]
 )
@@ -58,7 +63,12 @@ class RobotSystem:
         
         # Main processing thread
         self.processing_thread = None
-        
+
+        # Watchdog / health monitoring
+        self._last_frame_time = 0.0
+        self._health_ok = True
+        self._watchdog_thread = None
+
         logger.info("Robot system created")
     
     def setup(self) -> bool:
@@ -222,13 +232,21 @@ class RobotSystem:
             
             # 7. Create Autonomous Mapper
             logger.info("7. Initializing autonomous mapper...")
+            _mapper_baseline = (
+                abs(self.stereo_camera.T[0, 0])
+                if self.stereo_camera.T is not None
+                else self.config['camera']['stereo_baseline']
+            )
             self.autonomous_mapper = AutonomousMapper(
                 motor_controller=self.motor_controller,
                 slam_system=slam_for_mapper,  # Use fused SLAM if available
                 occupancy_grid=self.occupancy_grid,
                 obstacle_detector=self.obstacle_detector,
                 max_linear_speed=self.config['motor']['max_linear_speed'],
-                max_angular_speed=self.config['motor']['max_angular_speed']
+                max_angular_speed=self.config['motor']['max_angular_speed'],
+                camera_matrix=self.stereo_camera.K_left,
+                baseline=_mapper_baseline,
+                robot_radius=self.config.get('robot', {}).get('radius', 0.2)
             )
             
             logger.info("=== Robot System Setup Complete ===")
@@ -243,6 +261,10 @@ class RobotSystem:
         self.running = True
         self.processing_thread = threading.Thread(target=self._main_loop, daemon=True)
         self.processing_thread.start()
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop, daemon=True, name="watchdog"
+        )
+        self._watchdog_thread.start()
         logger.info("Main processing loop started")
     
     def _main_loop(self):
@@ -288,7 +310,8 @@ class RobotSystem:
                         self.autonomous_mapper.update_map_from_stereo(disparity, pose)
                     
                     frame_count += 1
-                    
+                    self._last_frame_time = time.time()
+
                     # Log statistics every 100 frames
                     if frame_count % 100 == 0:
                         elapsed = time.time() - start_time
@@ -310,7 +333,30 @@ class RobotSystem:
             except Exception as e:
                 logger.error(f"Main loop error: {e}", exc_info=True)
                 time.sleep(1.0)
-    
+
+    def _watchdog_loop(self):
+        """Monitor the main processing loop; stop motors if it goes silent."""
+        WATCHDOG_TIMEOUT = 5.0  # seconds without a frame before declaring unhealthy
+        while self.running:
+            time.sleep(1.0)
+            if self._last_frame_time > 0:
+                age = time.time() - self._last_frame_time
+                if age > WATCHDOG_TIMEOUT:
+                    if self._health_ok:
+                        self._health_ok = False
+                        logger.critical(
+                            f"Watchdog: main loop stalled for {age:.1f}s — stopping motors"
+                        )
+                        if self.motor_controller:
+                            try:
+                                self.motor_controller.stop()
+                            except Exception as exc:
+                                logger.error(f"Watchdog motor-stop failed: {exc}")
+                else:
+                    if not self._health_ok:
+                        logger.info("Watchdog: main loop recovered")
+                    self._health_ok = True
+
     def stop(self):
         """Stop all robot systems"""
         logger.info("Stopping robot system...")
@@ -359,7 +405,22 @@ class RobotSystem:
 
 
 def load_config():
-    """Load configuration from file or use defaults"""
+    """
+    Load configuration from config.yaml if present, otherwise use hardcoded defaults.
+    Edit config.yaml to change hardware settings without touching Python source.
+    """
+    yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+    if _YAML_AVAILABLE and os.path.exists(yaml_path):
+        try:
+            with open(yaml_path, "r") as f:
+                cfg = yaml.safe_load(f)
+            logger.info(f"Configuration loaded from {yaml_path}")
+            return cfg
+        except Exception as e:
+            logger.warning(f"Failed to read config.yaml ({e}), using defaults")
+
+    logger.warning("config.yaml not found or yaml unavailable — using hardcoded defaults")
+    # --- hardcoded defaults (kept as fallback) ---
     config = {
         'camera': {
             'left_id': 1,
@@ -443,11 +504,7 @@ def load_config():
 
 
 def signal_handler(signum, frame):
-    """Handle Ctrl+C gracefully"""
-    logger.info("Shutdown signal received")
-    if 'robot' in globals():
-        robot.stop()
-        robot.cleanup()
+    """Fallback signal handler (overridden in main() with a proper closure)."""
     sys.exit(0)
 
 
@@ -457,17 +514,22 @@ def main():
     logger.info("Autonomous Mapping Robot - Starting")
     logger.info("=" * 60)
     
-    # Register signal handler
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
     # Load configuration
     config = load_config()
     logger.info("Configuration loaded")
-    
+
     # Create robot system
-    global robot
     robot = RobotSystem(config)
+
+    # Register signal handler now that robot exists (closure — no globals() needed)
+    def _shutdown_handler(signum, frame):
+        logger.info("Shutdown signal received")
+        robot.stop()
+        robot.cleanup()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT,  _shutdown_handler)
+    signal.signal(signal.SIGTERM, _shutdown_handler)
     
     # Setup all components
     if not robot.setup():

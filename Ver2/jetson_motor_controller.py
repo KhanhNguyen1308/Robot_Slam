@@ -33,7 +33,10 @@ class A4988StepperMotor:
         self.enabled = False
         self.current_speed = 0  # steps per second
         self.direction = 1  # 1 = forward, -1 = backward
-        
+
+        # Step counter for odometry (signed: positive = forward direction)
+        self.total_steps = 0
+
         # Threading
         self.running = False
         self.thread = None
@@ -108,21 +111,36 @@ class A4988StepperMotor:
         with self.lock:
             self.current_speed = 0
             
+    def get_step_count(self) -> int:
+        """Return total signed step count since last reset (thread-safe)"""
+        with self.lock:
+            return self.total_steps
+
+    def reset_step_count(self):
+        """Reset step counter to zero (thread-safe)"""
+        with self.lock:
+            self.total_steps = 0
+
     def _step_loop(self):
         """Background thread for generating step pulses"""
         while self.running:
             with self.lock:
                 speed = self.current_speed
-            
+                direction = self.direction
+
             if speed > 0 and self.enabled:
                 # Calculate delay between steps
                 delay = 1.0 / (2.0 * speed)  # Divide by 2 for pulse width
-                
+
                 # Generate step pulse
                 GPIO.output(self.step_pin, GPIO.HIGH)
                 time.sleep(min(delay, 0.000005))  # Min 5us pulse width
                 GPIO.output(self.step_pin, GPIO.LOW)
                 time.sleep(delay)
+
+                # Count every pulse that was actually sent
+                with self.lock:
+                    self.total_steps += direction
             else:
                 time.sleep(0.001)  # Sleep 1ms when idle
                 
@@ -170,10 +188,10 @@ class JetsonMotorController:
         self.wheel_base = wheel_base
         self.steps_per_rev = steps_per_rev * microsteps
         
-        # Gear system: Motor(18) -> Intermediate(18) -> Wheel(38)
-        # Default gear ratio = 38/18 = 2.111 (motor spins 2.111x faster than wheel)
+        # Direct drive: motor shaft connects directly to 20-tooth sprocket (no intermediate gears)
+        # Gear ratio = 1.0 (motor and sprocket turn at the same rate)
         if gear_ratio is None:
-            self.gear_ratio = 38.0 / 18.0  # Default: 18->18->38 teeth
+            self.gear_ratio = 1.0  # Default: direct drive, 1:1
         else:
             self.gear_ratio = gear_ratio
         
@@ -204,7 +222,25 @@ class JetsonMotorController:
         self.enabled = False
         self.current_linear = 0.0
         self.current_angular = 0.0
-        
+
+        # --- Wheel odometry (integrated from stepper step counts) ---
+        # Pose in the robot's starting frame
+        self.odom_x = 0.0       # meters
+        self.odom_y = 0.0       # meters
+        self.odom_theta = 0.0   # radians
+        # Velocity estimates derived from the most recent integration window
+        self.odom_linear_vel = 0.0   # m/s
+        self.odom_angular_vel = 0.0  # rad/s
+        # Previous step counts used to compute deltas each cycle
+        self._last_left_steps = 0
+        self._last_right_steps = 0
+        self._last_odom_time = None
+        self._odom_lock = threading.Lock()
+        self._odom_running = False
+        self._odom_thread = None
+        self._odom_rate_hz = 50  # integration frequency
+        # -------------------------------------------------------
+
         # Statistics
         self.commands_sent = 0
         self.errors = 0
@@ -226,7 +262,18 @@ class JetsonMotorController:
         try:
             self.left_motor.start_thread()
             self.right_motor.start_thread()
-            logger.info("Motor control threads started")
+            # Reset counters and start odometry integration thread
+            self.left_motor.reset_step_count()
+            self.right_motor.reset_step_count()
+            self._last_left_steps = 0
+            self._last_right_steps = 0
+            self._last_odom_time = time.time()
+            self._odom_running = True
+            self._odom_thread = threading.Thread(
+                target=self._odometry_loop, daemon=True, name="odom"
+            )
+            self._odom_thread.start()
+            logger.info("Motor control threads started (odometry active)")
             return True
         except Exception as e:
             logger.error(f"Failed to start motor threads: {e}")
@@ -237,10 +284,15 @@ class JetsonMotorController:
         self.disable()
         self.send_velocity(0, 0)
         time.sleep(0.1)
-        
+
+        # Stop odometry thread before motor threads so we don't get a last-moment read
+        self._odom_running = False
+        if self._odom_thread:
+            self._odom_thread.join(timeout=1.0)
+
         self.left_motor.stop_thread()
         self.right_motor.stop_thread()
-        
+
         GPIO.cleanup()
         logger.info("GPIO cleaned up")
         
@@ -300,7 +352,121 @@ class JetsonMotorController:
     def set_velocity(self, linear: float, angular: float) -> bool:
         """Alias for send_velocity (compatibility with serial controller interface)"""
         return self.send_velocity(linear, angular)
-            
+
+    # ------------------------------------------------------------------
+    # Wheel odometry
+    # ------------------------------------------------------------------
+
+    def _odometry_loop(self):
+        """Background thread: integrates step counts into 2-D pose at _odom_rate_hz."""
+        interval = 1.0 / self._odom_rate_hz
+        while self._odom_running:
+            loop_start = time.time()
+            self._update_odometry()
+            elapsed = time.time() - loop_start
+            sleep_time = interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+    def _update_odometry(self):
+        """
+        Single odometry integration step.
+
+        Reads signed step counts from both motors, computes wheel distances,
+        then applies differential-drive kinematics (midpoint heading for
+        better arc accuracy).
+
+        Right motor steps are negated because send_velocity() already inverts
+        the right motor command to compensate for its reversed wiring.
+        """
+        now = time.time()
+
+        left_steps = self.left_motor.get_step_count()
+        right_steps = self.right_motor.get_step_count()
+
+        delta_left_steps = left_steps - self._last_left_steps
+        delta_right_steps = right_steps - self._last_right_steps
+
+        self._last_left_steps = left_steps
+        self._last_right_steps = right_steps
+
+        if delta_left_steps == 0 and delta_right_steps == 0:
+            # No motion — zero velocity estimates and return early
+            with self._odom_lock:
+                self.odom_linear_vel = 0.0
+                self.odom_angular_vel = 0.0
+                self._last_odom_time = now
+            return
+
+        # Convert steps to wheel arc distances.
+        # send_velocity() sets: steps_right = -v_right * steps_per_meter
+        # so positive right_steps means the right wheel moved backward —
+        # negate to recover the true forward distance.
+        dist_left = delta_left_steps / self.steps_per_meter
+        dist_right = -delta_right_steps / self.steps_per_meter  # undo hardware inversion
+
+        # Differential-drive kinematics
+        delta_dist = (dist_left + dist_right) / 2.0
+        delta_theta = (dist_right - dist_left) / self.wheel_base
+
+        # Integrate pose using midpoint heading (more accurate on arcs)
+        with self._odom_lock:
+            theta_mid = self.odom_theta + delta_theta / 2.0
+            self.odom_x += delta_dist * math.cos(theta_mid)
+            self.odom_y += delta_dist * math.sin(theta_mid)
+            self.odom_theta += delta_theta
+            # Keep theta in [-pi, pi]
+            self.odom_theta = math.atan2(
+                math.sin(self.odom_theta), math.cos(self.odom_theta)
+            )
+            # Velocity estimates
+            dt = now - self._last_odom_time if self._last_odom_time else 1.0
+            if dt > 0:
+                self.odom_linear_vel = delta_dist / dt
+                self.odom_angular_vel = delta_theta / dt
+            self._last_odom_time = now
+
+    def get_odometry(self) -> Dict:
+        """
+        Return the current dead-reckoning odometry.
+
+        Returns
+        -------
+        dict with keys:
+            x          – forward position (m) from start
+            y          – lateral position (m) from start
+            theta      – heading (rad) from start, in [-pi, pi]
+            linear_vel – estimated linear velocity (m/s)
+            angular_vel – estimated angular velocity (rad/s)
+            left_steps  – total signed steps sent to left wheel
+            right_steps – total signed steps sent to right wheel
+        """
+        with self._odom_lock:
+            return {
+                "x": self.odom_x,
+                "y": self.odom_y,
+                "theta": self.odom_theta,
+                "linear_vel": self.odom_linear_vel,
+                "angular_vel": self.odom_angular_vel,
+                "left_steps": self.left_motor.get_step_count(),
+                "right_steps": self.right_motor.get_step_count(),
+            }
+
+    def reset_odometry(self, x: float = 0.0, y: float = 0.0, theta: float = 0.0):
+        """Reset odometry pose to the given starting point."""
+        self.left_motor.reset_step_count()
+        self.right_motor.reset_step_count()
+        with self._odom_lock:
+            self.odom_x = x
+            self.odom_y = y
+            self.odom_theta = theta
+            self.odom_linear_vel = 0.0
+            self.odom_angular_vel = 0.0
+            self._last_left_steps = 0
+            self._last_right_steps = 0
+            self._last_odom_time = time.time()
+        logger.info(f"Odometry reset to ({x:.3f}, {y:.3f}, {math.degrees(theta):.1f}°)")
+
     def stop(self) -> bool:
         """Emergency stop"""
         logger.warning("Emergency stop triggered")
@@ -332,7 +498,8 @@ class JetsonMotorController:
             return False
         
     def get_stats(self) -> Dict:
-        """Get controller statistics"""
+        """Get controller statistics including wheel odometry"""
+        odom = self.get_odometry()
         return {
             "connected": self.connected,
             "enabled": self.enabled,
@@ -340,7 +507,15 @@ class JetsonMotorController:
             "errors": self.errors,
             "last_command_time": self.last_command_time,
             "linear_velocity": self.current_linear,
-            "angular_velocity": self.current_angular
+            "angular_velocity": self.current_angular,
+            # Dead-reckoning pose from step counts
+            "odom_x": odom["x"],
+            "odom_y": odom["y"],
+            "odom_theta_deg": math.degrees(odom["theta"]),
+            "odom_linear_vel": odom["linear_vel"],
+            "odom_angular_vel": odom["angular_vel"],
+            "left_steps": odom["left_steps"],
+            "right_steps": odom["right_steps"],
         }
         
     def get_status(self) -> Optional[Dict]:
