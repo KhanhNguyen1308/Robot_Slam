@@ -277,9 +277,9 @@ class JetsonMotorController:
             v_right = linear + (angular * self.wheel_base / 2.0)
             
             # Convert m/s to steps/s
-            # NOTE: Right motor direction is inverted (either mounted backwards or wired with reversed polarity)
-            steps_left = v_left * self.steps_per_meter     # Left motor: normal
-            steps_right = -v_right * self.steps_per_meter  # Right motor: inverted direction
+            # NOTE: Right motor is wired backwards, so invert it in software
+            steps_left = v_left * self.steps_per_meter      # Left motor: normal
+            steps_right = -v_right * self.steps_per_meter   # Right motor: INVERTED to compensate hardware
             
             # Set motor speeds
             self.left_motor.set_speed(steps_left)

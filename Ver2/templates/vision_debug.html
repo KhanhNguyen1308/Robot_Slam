@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Vision Processing Debug</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        .stats {
+            background: white;
+            padding: 15px;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+        }
+        .stat-item {
+            padding: 10px;
+            background: #f0f0f0;
+            border-radius: 4px;
+        }
+        .stat-label {
+            font-weight: bold;
+            color: #666;
+            font-size: 12px;
+        }
+        .stat-value {
+            font-size: 20px;
+            color: #333;
+            margin-top: 5px;
+        }
+        .pipeline-step {
+            background: white;
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+        }
+        .step-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .step-number {
+            background: #4CAF50;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            font-weight: bold;
+            margin-right: 15px;
+        }
+        .step-title {
+            font-size: 20px;
+            font-weight: bold;
+            color: #333;
+        }
+        .step-description {
+            color: #666;
+            margin-bottom: 15px;
+            line-height: 1.6;
+        }
+        .image-container {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .image-box {
+            flex: 1;
+            min-width: 300px;
+        }
+        .image-label {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #555;
+        }
+        .image-box img {
+            width: 100%;
+            height: auto;
+            border: 2px solid #ddd;
+            display: block;
+        }
+        .single-image {
+            width: 100%;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #999;
+        }
+        .error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border: 1px solid #ef5350;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎥 Vision Processing Pipeline Debug</h1>
+    
+    <div class="stats">
+        <h3 style="margin-top:0;">Performance Stats</h3>
+        <div class="stats-grid">
+            <div class="stat-item">
+                <div class="stat-label">FPS</div>
+                <div class="stat-value" id="fps">-</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Process Time</div>
+                <div class="stat-value" id="process_time">-</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">FAST Keypoints</div>
+                <div class="stat-value" id="fast_kp">-</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">ORB Left</div>
+                <div class="stat-value" id="kp_left">-</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">ORB Right</div>
+                <div class="stat-value" id="kp_right">-</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Matches</div>
+                <div class="stat-value" id="matches">-</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="error-message" class="error" style="display:none;"></div>
+    
+    <!-- Step 1: Camera Capture -->
+    <div class="pipeline-step">
+        <div class="step-header">
+            <div class="step-number">1</div>
+            <div class="step-title">Camera Capture</div>
+        </div>
+        <div class="step-description">
+            Lấy ảnh từ 2 camera stereo (trái và phải). Đây là input thô từ camera USB.
+        </div>
+        <div class="image-container">
+            <div class="image-box">
+                <div class="image-label">Left Camera</div>
+                <img id="left_original" src="" alt="Waiting for camera...">
+            </div>
+            <div class="image-box">
+                <div class="image-label">Right Camera</div>
+                <img id="right_original" src="" alt="Waiting for camera...">
+            </div>
+        </div>
+    </div>
+
+    <!-- Step 2: Grayscale Conversion -->
+    <div class="pipeline-step">
+        <div class="step-header">
+            <div class="step-number">2</div>
+            <div class="step-title">Grayscale Conversion</div>
+        </div>
+        <div class="step-description">
+            Chuyển đổi ảnh màu (BGR) sang ảnh xám (grayscale). Giảm dữ liệu từ 3 kênh xuống 1 kênh, 
+            tăng tốc độ xử lý và tập trung vào cường độ sáng thay vì màu sắc.
+        </div>
+        <div class="image-container">
+            <div class="image-box">
+                <div class="image-label">Left Grayscale</div>
+                <img id="left_gray" src="" alt="Processing...">
+            </div>
+            <div class="image-box">
+                <div class="image-label">Right Grayscale</div>
+                <img id="right_gray" src="" alt="Processing...">
+            </div>
+        </div>
+    </div>
+
+    <!-- Step 3: Disparity & Depth -->
+    <div class="pipeline-step">
+        <div class="step-header">
+            <div class="step-number">3</div>
+            <div class="step-title">Disparity & Depth Estimation</div>
+        </div>
+        <div class="step-description">
+            Tính toán disparity map (độ lệch pixel giữa 2 ảnh stereo) bằng StereoBM. 
+            Disparity tỷ lệ nghịch với khoảng cách: disparity cao = gần camera, disparity thấp = xa camera.
+            Công thức depth: <code>Z = (focal_length × baseline) / disparity</code>
+        </div>
+        <div class="image-container">
+            <div class="image-box">
+                <div class="image-label">Disparity Map (JET colormap)</div>
+                <img id="disparity" src="" alt="Processing...">
+            </div>
+            <div class="image-box">
+                <div class="image-label">Depth Map (TURBO colormap)</div>
+                <img id="depth" src="" alt="Processing...">
+            </div>
+        </div>
+    </div>
+
+    <!-- Step 4: FAST Feature Detection -->
+    <div class="pipeline-step">
+        <div class="step-header">
+            <div class="step-number">4</div>
+            <div class="step-title">FAST Feature Detection</div>
+        </div>
+        <div class="step-description">
+            <strong>FAST</strong> (Features from Accelerated Segment Test) phát hiện corner points (góc) trong ảnh.
+            Thuật toán kiểm tra 16 pixel xung quanh một điểm: nếu có ≥12 pixel liên tiếp sáng hơn hoặc tối hơn ngưỡng → đó là corner.
+            Rất nhanh, phù hợp cho real-time processing.
+        </div>
+        <div class="image-box single-image">
+            <div class="image-label">FAST Keypoints (green circles)</div>
+            <img id="fast_features" src="" alt="Processing...">
+        </div>
+    </div>
+
+    <!-- Step 5: ORB Descriptors -->
+    <div class="pipeline-step">
+        <div class="step-header">
+            <div class="step-number">5</div>
+            <div class="step-title">ORB Feature Descriptors</div>
+        </div>
+        <div class="step-description">
+            <strong>ORB</strong> (Oriented FAST and Rotated BRIEF) kết hợp FAST với BRIEF descriptor.
+            <br><strong>BRIEF</strong> (Binary Robust Independent Elementary Features): Mô tả feature bằng binary string (256-512 bits)
+            bằng cách so sánh cường độ sáng của các cặp pixel xung quanh keypoint.
+            <br>ORB thêm orientation (hướng) để BRIEF trở nên rotation-invariant.
+            Màu đỏ = keypoint với orientation (đường kẻ chỉ hướng).
+        </div>
+        <div class="image-box single-image">
+            <div class="image-label">ORB Keypoints with Orientation (red)</div>
+            <img id="orb_features" src="" alt="Processing...">
+        </div>
+    </div>
+
+    <!-- Step 6: Hamming Matching -->
+    <div class="pipeline-step">
+        <div class="step-header">
+            <div class="step-number">6</div>
+            <div class="step-title">Hamming Distance Matching</div>
+        </div>
+        <div class="step-description">
+            So khớp features giữa ảnh trái và phải bằng <strong>Hamming distance</strong>.
+            Hamming distance = số lượng bit khác nhau giữa 2 binary descriptors.
+            <br>Ví dụ: descriptor A = <code>10110</code>, B = <code>10010</code> → Hamming distance = 1 (bit thứ 3 khác nhau)
+            <br>BFMatcher (Brute Force Matcher) tìm best match cho mỗi feature trong ảnh trái.
+            Đường nối màu xanh = good matches (top 20 matches với distance thấp nhất).
+        </div>
+        <div class="image-box dual-image">
+            <div>
+                <div class="image-label">Camera Trái - ORB Features</div>
+                <img id="matches_left" src="" alt="Processing...">
+            </div>
+            <div>
+                <div class="image-label">Camera Phải - ORB Features</div>
+                <img id="matches_right" src="" alt="Processing...">
+            </div>
+        </div>
+        <div class="image-box single-image">
+            <div class="image-label">Kết Quả So Khớp (green lines: top 20 matches)</div>
+            <img id="matches_combined" src="" alt="Processing...">
+        </div>
+    </div>
+
+    <script>
+        function updateImages() {
+            fetch('/api/images')
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Failed to fetch images');
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    // Hide error
+                    document.getElementById('error-message').style.display = 'none';
+                    
+                    // Update stats
+                    if (data.stats) {
+                        document.getElementById('fps').textContent = data.stats.fps || '-';
+                        document.getElementById('process_time').textContent = 
+                            (data.stats.process_time_ms || '-') + ' ms';
+                        document.getElementById('fast_kp').textContent = 
+                            data.stats.num_fast_keypoints || '-';
+                        document.getElementById('kp_left').textContent = 
+                            data.stats.num_keypoints_left || '-';
+                        document.getElementById('kp_right').textContent = 
+                            data.stats.num_keypoints_right || '-';
+                        document.getElementById('matches').textContent = 
+                            data.stats.num_matches || '-';
+                    }
+                    
+                    // Update images
+                    const imageIds = [
+                        'left_original', 'right_original',
+                        'left_gray', 'right_gray',
+                        'disparity', 'depth',
+                        'fast_features', 'orb_features'
+                    ];
+                    
+                    imageIds.forEach(id => {
+                        const img = document.getElementById(id);
+                        if (data[id]) {
+                            img.src = 'data:image/jpeg;base64,' + data[id];
+                        }
+                    });
+                    
+                    // Update matching images separately
+                    if (data.matches_left) {
+                        document.getElementById('matches_left').src = 'data:image/jpeg;base64,' + data.matches_left;
+                    }
+                    if (data.matches_right) {
+                        document.getElementById('matches_right').src = 'data:image/jpeg;base64,' + data.matches_right;
+                    }
+                    if (data.matches_combined) {
+                        document.getElementById('matches_combined').src = 'data:image/jpeg;base64,' + data.matches_combined;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    const errDiv = document.getElementById('error-message');
+                    errDiv.textContent = 'Error: ' + error.message + ' - Check if server is running';
+                    errDiv.style.display = 'block';
+                });
+        }
+        
+        // Update every 100ms (~10 FPS display)
+        setInterval(updateImages, 100);
+        
+        // Initial update
+        updateImages();
+    </script>
+</body>
+</html>
