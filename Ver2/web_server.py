@@ -275,14 +275,14 @@ def generate_map():
                         # Draw robot as red circle
                         cv2.circle(map_img, (robot_gx, robot_gy), 5, (0, 0, 255), -1)
                         
-                        # Draw heading indicator
+                        # Draw heading indicator - DISABLED (robot rotation not calibrated yet)
                         # Note: Image Y-axis points down, World Y-axis points up
                         # So we need to negate the Y component
-                        arrow_len = 10
-                        end_x = int(robot_gx + arrow_len * np.cos(mapper.theta))
-                        end_y = int(robot_gy - arrow_len * np.sin(mapper.theta))  # Negate Y for image coords
-                        cv2.arrowedLine(map_img, (robot_gx, robot_gy), 
-                                      (end_x, end_y), (255, 0, 0), 2)
+                        # arrow_len = 10
+                        # end_x = int(robot_gx + arrow_len * np.cos(mapper.theta))
+                        # end_y = int(robot_gy - arrow_len * np.sin(mapper.theta))  # Negate Y for image coords
+                        # cv2.arrowedLine(map_img, (robot_gx, robot_gy), 
+                        #               (end_x, end_y), (255, 0, 0), 2)
                 
                 # Overlay goal if exists
                 if mapper.planner.current_goal:

@@ -371,8 +371,8 @@ def load_config():
             'fps': 30,
             # Manual camera settings to fix auto-exposure/white-balance mismatch
             'use_manual_settings': True,  # CRITICAL: Set to True to fix color mismatch
-            'manual_exposure': -6,        # Adjust between -13 (dark) to -1 (bright)
-            'manual_gain': 50             # Lower = less noise, higher = brighter
+            'manual_exposure': -5,        # Increased from -6 for brighter image
+            'manual_gain': 55             # Increased from 50 for better brightness match
         },
         'slam': {
             'use_orbslam3': False,  # Set to True if ORB-SLAM3 is properly built
@@ -392,11 +392,24 @@ def load_config():
             'right_ms1_pin': 13,
             'right_ms2_pin': 15,
             'right_ms3_pin': 16,
-            'wheel_diameter': 0.066,  # 66mm
-            'wheel_base': 0.275,      # 275mm
+            
+            # Track/Sprocket configuration (Updated 2026-02-22)
+            # Custom sprocket: 20 teeth (mounted on intermediate shaft with 38-tooth gear)
+            # Custom design from CAD:
+            #   - Outer diameter: 69.84mm (R=34.9218mm) ← ACTUAL working diameter
+            #   - Inner diameter: 60mm (R=30mm)
+            # Track separation: 284.5mm (center to center)
+            'wheel_diameter': 0.06984,  # 69.84mm outer diameter from CAD (confirmed)
+            'wheel_base': 0.2845,       # 284.5mm track separation
             'steps_per_rev': 200,
             'microsteps': 16,
-            'gear_ratio': 38.0 / 18.0,  # Motor(18) -> Intermediate(18) -> Wheel(38) = 2.111:1
+            
+            # Gear ratio configuration:
+            # Motor shaft: 18-tooth gear
+            # Intermediate shaft: 38-tooth gear (receives from motor) + 20-tooth sprocket (same shaft)
+            # Single-stage reduction: motor must rotate 38/18 times for sprocket to rotate once
+            'gear_ratio': 38/18,  # 2.111 (motor rotations per wheel rotation)
+            
             'max_linear_speed': 0.3,   # m/s
             'max_angular_speed': 1.5   # rad/s
         },

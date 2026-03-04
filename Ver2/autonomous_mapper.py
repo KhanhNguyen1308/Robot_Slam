@@ -296,8 +296,11 @@ class AutonomousMapper:
         """Stop autonomous exploration"""
         self.running = False
         self.mapping_mode = "idle"
-        if self.thread:
+        
+        # Don't join if we're in the exploration thread itself
+        if self.thread and threading.current_thread() != self.thread:
             self.thread.join(timeout=2.0)
+        
         self.motor.stop()
         logger.info("Autonomous exploration stopped")
     
@@ -319,14 +322,16 @@ class AutonomousMapper:
                         if theta_diff > np.pi:
                             theta_diff = 2 * np.pi - theta_diff
                         
-                        # If orientation jumps too much (>45 degrees in one frame)
+                        # If orientation jumps too much (>60 degrees in one frame)
                         # and we're not moving much, it's likely a visual tracking error
-                        if theta_diff > np.pi/4:
+                        if theta_diff > np.pi/3:  # 60 degrees
                             dist_moved = np.sqrt((new_x - self.x)**2 + (new_y - self.y)**2)
                             if dist_moved < 0.05:  # Less than 5cm movement
                                 logger.warning(f"Large orientation jump detected ({np.degrees(theta_diff):.1f}°), smoothing...")
-                                # Smooth the orientation change
-                                new_theta = self.theta + np.clip(theta_diff, -np.pi/8, np.pi/8) * np.sign(new_theta - self.theta)
+                                # Smooth the orientation change - allow max 10 degrees per frame
+                                max_change = np.pi/18  # 10 degrees
+                                sign = 1 if (new_theta - self.theta) > 0 else -1
+                                new_theta = self.theta + sign * min(theta_diff, max_change)
                     
                     self.x, self.y, self.theta = new_x, new_y, new_theta
                 
