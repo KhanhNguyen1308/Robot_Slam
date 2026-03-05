@@ -5,15 +5,37 @@ Integrates SLAM, motor control, and exploration strategy
 import numpy as np
 import cv2
 import logging
-import time
-import threading
 import math
 import heapq
-from typing import Optional, Tuple, List, Dict
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 from collections import deque
 from obstacle_detector import ObstacleDetector
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Semantic object record
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SemanticObject:
+    """A detected object anchored to world coordinates."""
+    label: str
+    confidence: float
+    world_x: float
+    world_y: float
+    # Bearing from robot at detection time (radians, robot frame)
+    bearing: float = 0.0
+    # How many consecutive frames this object has been seen
+    hits: int = 1
+    last_seen: float = field(default_factory=time.time)
+
+
+# ---------------------------------------------------------------------------
 
 
 class OccupancyGrid:
@@ -349,7 +371,16 @@ class AutonomousMapper:
         self.exploration_time = 0.0
         self.frontiers_visited = 0
         self.obstacles_avoided = 0
-        
+
+        # Semantic map — populated by VisionServerClient detections
+        # key: label string, value: list of SemanticObject (one per distinct location)
+        self._semantic_map: Dict[str, List[SemanticObject]] = {}
+        self._semantic_lock = threading.Lock()
+        # Vision client reference (set externally by RobotSystem.setup)
+        self.vision_client: Optional[Any] = None
+        # Minimum movement (m) before we re-anchor a new semantic record
+        self._semantic_anchor_radius = 0.5
+
         logger.info("Autonomous mapper initialized with obstacle avoidance")
     
     def start_exploration(self):
@@ -624,7 +655,14 @@ class AutonomousMapper:
         # Add obstacle detector stats if available
         if self.obstacle_detector:
             stats["obstacle_stats"] = self.obstacle_detector.get_stats()
-        
+
+        # Semantic map summary
+        with self._semantic_lock:
+            stats["semantic_objects"] = {
+                label: len(objs)
+                for label, objs in self._semantic_map.items()
+            }
+
         return stats
     
     def save_map(self, filepath: str):
@@ -648,3 +686,115 @@ class AutonomousMapper:
         self.grid.origin_x = float(data['origin_x'])
         self.grid.origin_y = float(data['origin_y'])
         logger.info(f"Map loaded from {filepath}")
+
+    # ------------------------------------------------------------------
+    # Semantic map helpers
+    # ------------------------------------------------------------------
+
+    def update_semantic_detections(self, detections: List[Any]):
+        """Anchor YOLO detections to world coordinates using current robot pose.
+
+        Each detection's horizontal position in the image is used together with
+        the camera's horizontal FOV to derive a bearing.  The robot's current
+        pose (self.x, self.y, self.theta) then places the object on the map at
+        an assumed range of 2 m (a simple heuristic — good enough to tag rooms
+        and navigate-to-object goals).
+
+        Args:
+            detections: List of ``Detection`` objects from ``VisionServerClient``.
+        """
+        if not detections:
+            return
+
+        import math
+        hfov = math.radians(
+            getattr(self, '_camera_hfov_deg', 90.0)
+        )
+        ASSUMED_RANGE_M = 2.0
+
+        with self._semantic_lock:
+            for det in detections:
+                # bearing = offset from image centre mapped to [-hfov/2, hfov/2]
+                bearing_offset = (det.center_x - 0.5) * hfov
+                global_bearing = self.theta + bearing_offset
+
+                obj_x = self.x + ASSUMED_RANGE_M * math.cos(global_bearing)
+                obj_y = self.y + ASSUMED_RANGE_M * math.sin(global_bearing)
+
+                label = det.label
+                existing = self._semantic_map.setdefault(label, [])
+
+                # Check if an entry near this location already exists
+                merged = False
+                for obj in existing:
+                    dist = math.hypot(obj.world_x - obj_x, obj.world_y - obj_y)
+                    if dist < self._semantic_anchor_radius:
+                        # Update existing record (moving average position)
+                        alpha = 0.1  # low-pass weight of new observation
+                        obj.world_x = obj.world_x * (1 - alpha) + obj_x * alpha
+                        obj.world_y = obj.world_y * (1 - alpha) + obj_y * alpha
+                        obj.confidence = max(obj.confidence, det.confidence)
+                        obj.hits += 1
+                        obj.last_seen = time.time()
+                        merged = True
+                        break
+
+                if not merged:
+                    existing.append(
+                        SemanticObject(
+                            label=label,
+                            confidence=det.confidence,
+                            world_x=obj_x,
+                            world_y=obj_y,
+                            bearing=global_bearing,
+                        )
+                    )
+                    logger.info(
+                        f"Semantic map: new '{label}' @ "
+                        f"({obj_x:.2f}, {obj_y:.2f}) conf={det.confidence:.2f}"
+                    )
+
+    def get_objects_near(
+        self,
+        label: str,
+        max_distance_m: float = 5.0,
+        min_hits: int = 2,
+    ) -> List[SemanticObject]:
+        """Return all anchored objects of ``label`` within ``max_distance_m``.
+
+        Args:
+            label:          YOLO class label to search for (e.g. 'chair').
+            max_distance_m: Ignore objects further than this.
+            min_hits:       Minimum frame count to treat the object as reliable.
+
+        Returns:
+            Sorted list (nearest first) of matching SemanticObject records.
+        """
+        with self._semantic_lock:
+            candidates = self._semantic_map.get(label, [])
+            results = []
+            for obj in candidates:
+                if obj.hits < min_hits:
+                    continue
+                dist = math.hypot(obj.world_x - self.x, obj.world_y - self.y)
+                if dist <= max_distance_m:
+                    results.append((dist, obj))
+            results.sort(key=lambda t: t[0])
+            return [obj for _, obj in results]
+
+    def get_semantic_map(self) -> Dict[str, List[dict]]:
+        """Return a JSON-serialisable snapshot of the semantic map."""
+        with self._semantic_lock:
+            out: Dict[str, List[dict]] = {}
+            for label, objs in self._semantic_map.items():
+                out[label] = [
+                    {
+                        "world_x":    round(o.world_x, 3),
+                        "world_y":    round(o.world_y, 3),
+                        "confidence": round(o.confidence, 3),
+                        "hits":       o.hits,
+                        "last_seen":  round(o.last_seen, 1),
+                    }
+                    for o in objs
+                ]
+            return out

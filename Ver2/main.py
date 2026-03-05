@@ -28,6 +28,7 @@ from obstacle_detector import ObstacleDetector
 from mpu6050_imu import MPU6050, ComplementaryFilter
 from imu_fusion import IMUVisualFusion, FusedSLAMWrapper
 from web_server import init_web_server, run_web_server
+from server_client import VisionServerClient
 
 # Configure logging
 logging.basicConfig(
@@ -60,7 +61,10 @@ class RobotSystem:
         self.obstacle_detector = None
         self.occupancy_grid = None
         self.autonomous_mapper = None
-        
+
+        # 4K object-detection camera + server client
+        self.vision_client: VisionServerClient = None
+
         # Main processing thread
         self.processing_thread = None
 
@@ -249,6 +253,40 @@ class RobotSystem:
                 robot_radius=self.config.get('robot', {}).get('radius', 0.2)
             )
             
+            # 8. Initialize UGREEN 4K camera + vision server client
+            vs_cfg = self.config.get('vision_server', {})
+            oc_cfg = self.config.get('object_camera', {})
+            if vs_cfg.get('enabled', False):
+                logger.info("8. Initializing vision server client (YOLOv11)...")
+                self.vision_client = VisionServerClient(
+                    device_id=oc_cfg.get('device_id', 2),
+                    capture_width=oc_cfg.get('capture_width', 3840),
+                    capture_height=oc_cfg.get('capture_height', 2160),
+                    capture_fps=oc_cfg.get('capture_fps', 15),
+                    stream_width=oc_cfg.get('stream_width', 1280),
+                    stream_height=oc_cfg.get('stream_height', 720),
+                    jpeg_quality=oc_cfg.get('jpeg_quality', 85),
+                    server_host=vs_cfg.get('host', '192.168.2.10'),
+                    server_port=vs_cfg.get('port', 8090),
+                    timeout_s=vs_cfg.get('timeout_s', 0.15),
+                    min_confidence=vs_cfg.get('min_confidence', 0.40),
+                )
+                if self.vision_client.start():
+                    # Give mapper access to horizontal FOV for bearing calc
+                    self.autonomous_mapper.vision_client = self.vision_client
+                    self.autonomous_mapper._camera_hfov_deg = vs_cfg.get(
+                        'camera_hfov_deg', 90.0
+                    )
+                    logger.info("Vision server client started (UGREEN 4K → x99 YOLOv11)")
+                else:
+                    logger.warning(
+                        "Vision server client failed to open camera — "
+                        "object detection disabled"
+                    )
+                    self.vision_client = None
+            else:
+                logger.info("8. Vision server disabled (vision_server.enabled=false)")
+
             logger.info("=== Robot System Setup Complete ===")
             return True
             
@@ -308,7 +346,13 @@ class RobotSystem:
                     # Update mapper with disparity map
                     if disparity is not None and pose is not None:
                         self.autonomous_mapper.update_map_from_stereo(disparity, pose)
-                    
+
+                    # Feed YOLO detections into semantic map (non-blocking)
+                    if self.vision_client is not None:
+                        detections = self.vision_client.get_latest_detections()
+                        if detections:
+                            self.autonomous_mapper.update_semantic_detections(detections)
+
                     frame_count += 1
                     self._last_frame_time = time.time()
 
@@ -327,6 +371,14 @@ class RobotSystem:
                         logger.info(f"Mapper: mode={mapper_stats['mode']}, "
                                   f"coverage={mapper_stats['coverage_percent']:.1f}%, "
                                   f"obstacles_avoided={mapper_stats.get('obstacles_avoided', 0)}")
+
+                        # Semantic map summary
+                        sem = mapper_stats.get('semantic_objects', {})
+                        if sem:
+                            summary = ', '.join(f"{k}:{v}" for k, v in sem.items())
+                            logger.info(f"Semantic map: {summary}")
+                        if self.vision_client:
+                            logger.info(f"Vision client: {self.vision_client.get_stats()}")
                 
                 time.sleep(0.01)  # ~100 Hz max
                 
@@ -377,7 +429,11 @@ class RobotSystem:
         if self.stereo_camera:
             self.stereo_camera.stop_capture()
             self.stereo_camera.release()
-        
+
+        # Stop vision server client
+        if self.vision_client:
+            self.vision_client.stop()
+
         # Stop IMU
         if self.imu_sensor:
             self.imu_sensor.disconnect()
@@ -550,7 +606,8 @@ def main():
         robot.fused_slam if robot.fused_slam else robot.slam_system,
         robot.stereo_camera,
         robot.autonomous_mapper,
-        robot.imu_sensor
+        robot.imu_sensor,
+        robot.vision_client,
     )
     
     # Start web server (blocking)

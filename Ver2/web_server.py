@@ -57,20 +57,32 @@ robot_state = {
     'stereo_camera': None,
     'autonomous_mapper': None,
     'imu_sensor': None,
+    'vision_client': None,
     'latest_frame': None,
     'latest_map': None,
     'lock': Lock()
 }
 
 
-def init_web_server(motor_controller, slam_system, stereo_camera, autonomous_mapper, imu_sensor=None):
+def init_web_server(
+    motor_controller,
+    slam_system,
+    stereo_camera,
+    autonomous_mapper,
+    imu_sensor=None,
+    vision_client=None,
+):
     """Initialize web server with robot components"""
     robot_state['motor_controller'] = motor_controller
     robot_state['slam_system'] = slam_system
     robot_state['stereo_camera'] = stereo_camera
     robot_state['autonomous_mapper'] = autonomous_mapper
     robot_state['imu_sensor'] = imu_sensor
-    logger.info(f"Web server initialized with robot components (IMU: {imu_sensor is not None})")
+    robot_state['vision_client'] = vision_client
+    logger.info(
+        f"Web server initialized (IMU: {imu_sensor is not None}, "
+        f"VisionClient: {vision_client is not None})"
+    )
 
 
 @app.route('/')
@@ -266,6 +278,109 @@ def video_feed():
     """Video streaming route for stereo camera"""
     return Response(generate_frames(),
                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/api/detections')
+def get_detections():
+    """Get latest YOLO object detections from the x99 vision server."""
+    vc = robot_state.get('vision_client')
+    if vc is None:
+        return jsonify({'available': False, 'detections': []})
+
+    dets = vc.get_latest_detections()
+    return jsonify({
+        'available': True,
+        'server_online': vc.is_server_available,
+        'count': len(dets),
+        'detections': [
+            {
+                'label':      d.label,
+                'confidence': round(d.confidence, 3),
+                'bbox':       list(d.bbox),
+                'center_x':   round(d.center_x, 4),
+                'center_y':   round(d.center_y, 4),
+            }
+            for d in dets
+        ],
+        'stats': vc.get_stats(),
+    })
+
+
+@app.route('/api/semantic_map')
+def get_semantic_map():
+    """Get the full semantic object map anchored to world coordinates."""
+    mapper = robot_state.get('autonomous_mapper')
+    if mapper is None:
+        return jsonify({'available': False, 'objects': {}})
+    return jsonify({
+        'available': True,
+        'objects': mapper.get_semantic_map(),
+    })
+
+
+@app.route('/object_feed')
+def object_feed():
+    """MJPEG stream from the 4K UGREEN webcam with YOLO bbox overlays."""
+    return Response(
+        generate_object_frames(),
+        mimetype='multipart/x-mixed-replace; boundary=frame',
+    )
+
+
+def generate_object_frames():
+    """Yield JPEG frames from the vision client with detection overlays."""
+    # Colours for bounding boxes (BGR)
+    _BOX_COLOUR  = (0, 220, 0)
+    _TEXT_COLOUR = (0, 0, 0)
+    _BG_COLOUR   = (0, 220, 0)
+
+    while True:
+        vc = robot_state.get('vision_client')
+        if vc is None:
+            time.sleep(0.5)
+            continue
+
+        frame = vc.get_latest_frame()
+        if frame is None:
+            time.sleep(0.05)
+            continue
+
+        detections = vc.get_latest_detections()
+
+        # Draw detections on a copy of the frame
+        vis = frame.copy()
+        for det in detections:
+            x1, y1, x2, y2 = det.bbox
+            cv2.rectangle(vis, (x1, y1), (x2, y2), _BOX_COLOUR, 2)
+            label_text = f"{det.label} {det.confidence:.0%}"
+            (tw, th), _ = cv2.getTextSize(
+                label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
+            )
+            cv2.rectangle(vis, (x1, y1 - th - 6), (x1 + tw + 4, y1), _BG_COLOUR, -1)
+            cv2.putText(
+                vis, label_text,
+                (x1 + 2, y1 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, _TEXT_COLOUR, 1, cv2.LINE_AA,
+            )
+
+        # Server status overlay (top-right corner)
+        status_txt = "SERVER OK" if vc.is_server_available else "SERVER OFFLINE"
+        status_col = (0, 200, 0) if vc.is_server_available else (0, 0, 220)
+        cv2.putText(
+            vis, status_txt,
+            (vis.shape[1] - 200, 30),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_col, 2, cv2.LINE_AA,
+        )
+
+        ret, buf = cv2.imencode('.jpg', vis, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ret:
+            yield (
+                b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
+                + buf.tobytes()
+                + b'\r\n'
+            )
+
+        time.sleep(0.066)  # ~15 FPS matches camera capture rate
 
 
 def generate_frames():

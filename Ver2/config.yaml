@@ -67,3 +67,27 @@ web_server:
   host: "0.0.0.0"
   port: 5000
   debug: false
+
+# --- 4K UGREEN webcam (device 2) -----------------------------------------
+# Used for wide-angle object detection via the x99 server.
+# Set capture_fps lower (10-15) at 4K to stay within USB 3.0 bandwidth.
+object_camera:
+  device_id: 2                # /dev/video2
+  capture_width: 3840         # native 4K
+  capture_height: 2160
+  capture_fps: 15
+  stream_width: 1280          # downscale before sending to server
+  stream_height: 720
+  jpeg_quality: 85            # JPEG quality for network transmission
+
+# --- x99 inference server (192.168.2.10) ----------------------------------
+# The server runs server/inference_server.py with YOLOv11.
+# Disable (enabled: false) if the server is offline; the robot falls back
+# to stereo-only obstacle detection without semantic labels.
+vision_server:
+  host: "192.168.2.10"
+  port: 8090
+  enabled: true
+  timeout_s: 0.15             # max wait per request (safety: never blocks robot)
+  min_confidence: 0.40        # discard detections below this threshold
+  camera_hfov_deg: 90.0       # UGREEN webcam horizontal field-of-view (approx)
