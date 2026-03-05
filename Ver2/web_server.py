@@ -8,12 +8,47 @@ import numpy as np
 import logging
 import json
 import base64
+import os
+import functools
 from threading import Lock
 import time
 
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# -------------------------------------------------------------------------
+# API token auth
+# Token is read from the ROBOT_API_TOKEN env var (set on the Jetson before
+# starting the server, e.g. `export ROBOT_API_TOKEN=<long-random-string>`).
+# All state-mutating POST endpoints require the caller to supply the token
+# in the X-Robot-Token request header.
+# If ROBOT_API_TOKEN is not set, a warning is logged and auth is bypassed
+# (development / first-boot convenience).
+# -------------------------------------------------------------------------
+_API_TOKEN: str = os.environ.get('ROBOT_API_TOKEN', '')
+if not _API_TOKEN:
+    logger.warning(
+        'ROBOT_API_TOKEN env var is not set — motor control endpoints are '
+        'UNAUTHENTICATED. Set the variable before production use.'
+    )
+
+
+def require_token(f):
+    """Decorator that enforces X-Robot-Token header on mutating endpoints."""
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        if _API_TOKEN:  # Only enforce when a token has been configured
+            token = request.headers.get('X-Robot-Token', '')
+            if token != _API_TOKEN:
+                logger.warning(
+                    f'Rejected unauthorised request to {request.path} '
+                    f'from {request.remote_addr}'
+                )
+                return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
 
 # Global state (will be set by main application)
 robot_state = {
@@ -121,6 +156,7 @@ def get_imu():
 
 
 @app.route('/api/motor/enable', methods=['POST'])
+@require_token
 def motor_enable():
     """Enable motors"""
     with robot_state['lock']:
@@ -132,6 +168,7 @@ def motor_enable():
 
 
 @app.route('/api/motor/disable', methods=['POST'])
+@require_token
 def motor_disable():
     """Disable motors"""
     with robot_state['lock']:
@@ -143,6 +180,7 @@ def motor_disable():
 
 
 @app.route('/api/motor/stop', methods=['POST'])
+@require_token
 def motor_stop():
     """Emergency stop"""
     with robot_state['lock']:
@@ -154,6 +192,7 @@ def motor_stop():
 
 
 @app.route('/api/motor/velocity', methods=['POST'])
+@require_token
 def set_velocity():
     """Set motor velocities"""
     data = request.json
@@ -169,6 +208,7 @@ def set_velocity():
 
 
 @app.route('/api/exploration/start', methods=['POST'])
+@require_token
 def start_exploration():
     """Start autonomous exploration"""
     with robot_state['lock']:
@@ -180,6 +220,7 @@ def start_exploration():
 
 
 @app.route('/api/exploration/stop', methods=['POST'])
+@require_token
 def stop_exploration():
     """Stop autonomous exploration"""
     with robot_state['lock']:
@@ -191,6 +232,7 @@ def stop_exploration():
 
 
 @app.route('/api/map/save', methods=['POST'])
+@require_token
 def save_map():
     """Save current map"""
     data = request.json
@@ -205,6 +247,7 @@ def save_map():
 
 
 @app.route('/api/map/load', methods=['POST'])
+@require_token
 def load_map():
     """Load saved map"""
     data = request.json

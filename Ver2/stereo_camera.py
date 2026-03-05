@@ -436,20 +436,22 @@ class StereoCamera:
         """Background thread for continuous frame capture"""
         while self.running:
             left, right = self.capture_frames()
-            
+
             if left is not None and right is not None:
-                # Rectify
+                # Rectify and compute disparity BEFORE acquiring the lock so
+                # consumers always get a consistent (frame, disparity) pair
+                # captured at the same moment.
                 left_rect, right_rect = self.rectify_frames(left, right)
-                
-                # Compute disparity
                 disparity = self.compute_disparity(left_rect, right_rect)
-                
+
                 with self.lock:
                     self.latest_left = left_rect
                     self.latest_right = right_rect
                     self.latest_disparity = disparity
-            
-            time.sleep(0.01)  # ~100 FPS max
+            else:
+                # Only sleep on failure to avoid busy-looping on camera errors.
+                # On success the StereoSGBM compute() already takes 30-200 ms.
+                time.sleep(0.01)
     
     def start_capture(self):
         """Start background capture thread"""

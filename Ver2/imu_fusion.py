@@ -225,13 +225,14 @@ class IMUVisualFusion:
         with self.lock:
             current_time = time.time()
             
-            if self.last_update_time is None:
+            if self.last_imu_time is None:
                 self.last_update_time = current_time
                 self.last_imu_time = current_time
                 return
-            
-            dt = current_time - self.last_update_time
-            
+
+            # Use last IMU timestamp so visual updates don't corrupt dt
+            dt = current_time - self.last_imu_time
+
             if self.use_ekf and self.ekf:
                 # Predict step with IMU
                 self.ekf.predict(dt, gyro_z)
@@ -268,7 +269,7 @@ class IMUVisualFusion:
             self.y = y
             self.theta = theta
             self.last_update_time = None
-            self.visual_quality = self.current_visual_quality
+            self.current_visual_quality = 1.0
             self.last_visual_time = None
             self.last_imu_time = None
             logger.info(f"Sensor fusion reset to ({x}, {y}, {theta})")
@@ -308,11 +309,14 @@ class FusedSLAMWrapper:
         self.slam = slam_system
         self.imu = imu_sensor
         self.fusion = IMUVisualFusion(use_ekf=use_ekf, imu_weight=imu_weight)
-        
+
+        # Cache last visual pose to avoid feeding duplicate measurements to EKF
+        self._last_visual_pose: Optional[Tuple[float, float, float]] = None
+
         # Background fusion thread
         self.running = False
         self.fusion_thread = None
-        
+
         logger.info("Fused SLAM wrapper initialized")
     
     def start(self):
@@ -334,20 +338,28 @@ class FusedSLAMWrapper:
         """Continuous fusion of SLAM and IMU data"""
         while self.running:
             try:
-                # Get visual odometry from SLAM
+                # Get visual odometry from SLAM — only forward NEW poses to the EKF
                 slam_pose = self.slam.get_2d_pose()
                 if slam_pose:
                     x, y, theta = slam_pose
-                    
-                    # Get tracking quality if available
-                    quality = 1.0
-                    if hasattr(self.slam, 'tracking_quality'):
-                        quality = self.slam.tracking_quality
-                    elif hasattr(self.slam, 'get_stats'):
-                        stats = self.slam.get_stats()
-                        quality = stats.get('tracking_quality', 1.0)
-                    
-                    self.fusion.update_from_visual(x, y, theta, quality=quality)
+
+                    # Deduplicate: skip if pose is identical to last seen pose
+                    if self._last_visual_pose is None or (
+                        abs(x - self._last_visual_pose[0]) > 1e-6
+                        or abs(y - self._last_visual_pose[1]) > 1e-6
+                        or abs(theta - self._last_visual_pose[2]) > 1e-6
+                    ):
+                        self._last_visual_pose = (x, y, theta)
+
+                        # Get tracking quality if available
+                        quality = 1.0
+                        if hasattr(self.slam, 'tracking_quality'):
+                            quality = self.slam.tracking_quality
+                        elif hasattr(self.slam, 'get_stats'):
+                            stats = self.slam.get_stats()
+                            quality = stats.get('tracking_quality', 1.0)
+
+                        self.fusion.update_from_visual(x, y, theta, quality=quality)
                 
                 # Get IMU gyroscope data
                 gyro = self.imu.get_gyro()
