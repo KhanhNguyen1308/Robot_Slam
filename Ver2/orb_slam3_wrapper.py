@@ -669,13 +669,13 @@ class SimpleVisualSLAM:
     def get_stats(self) -> dict:
         """Get SLAM statistics"""
         return {
-            "frames_processed": 0,
+            "frames_processed": self.frames_processed,
             "tracking_state": "OK" if self.initialized else "NOT_INITIALIZED",
-            "tracking_lost_count": 0,
+            "tracking_lost_count": self.tracking_lost_count,
             "map_points": len(self.map_points),
             "has_pose": True,
-            "last_num_matches": getattr(self, 'last_num_matches', 0),
-            "tracking_quality": getattr(self, 'tracking_quality', 1.0)
+            "last_num_matches": self.last_num_matches,
+            "tracking_quality": self.tracking_quality
         }
         
     
