@@ -479,8 +479,8 @@ def load_config():
     # --- hardcoded defaults (kept as fallback) ---
     config = {
         'camera': {
-            'left_id': 1,
-            'right_id': 0,
+            'left_id': 2,
+            'right_id': 1,
             'calibration_file': 'calibration.npz',
             'stereo_baseline': 0.14,  # 14cm baseline - IMPORTANT: must match hardware!
             'width': 640,

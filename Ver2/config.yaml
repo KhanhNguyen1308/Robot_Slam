@@ -2,8 +2,8 @@
 # Edit this file to match your hardware without touching Python source code.
 
 camera:
-  left_id: 1
-  right_id: 0
+  left_id: 2
+  right_id: 1
   calibration_file: data/calibration.npz
   stereo_baseline: 0.14       # metres — must match physical hardware
   width: 640
