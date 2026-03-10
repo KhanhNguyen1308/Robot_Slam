@@ -1,0 +1,65 @@
+# =============================================================================
+# Ver2 Autonomous Mapping Robot — Python 3 Dependencies
+# Jetson Nano (JetPack 4.x, Ubuntu 18.04/20.04, Python 3.6+)
+# =============================================================================
+# Install with:
+#   pip3 install -r requirements.txt
+#
+# Notes
+# -----
+# * opencv-python       — use the JetPack-provided build when possible:
+#                         pip3 install opencv-python is fine for dev/testing;
+#                         on the Jetson itself the pre-built CUDA-enabled wheel
+#                         from JetPack is preferred (do NOT pip-install cv2 if
+#                         it was already installed by JetPack).
+#
+# * Jetson.GPIO         — GPIO access on Jetson Nano.
+#                         sudo pip3 install Jetson.GPIO
+#                         sudo groupadd -f gpio
+#                         sudo usermod -aG gpio $USER
+#
+# * smbus2              — I2C bus access for MPU6050 IMU.
+#
+# * ultralytics         — YOLOv8/v11 (inference server only, not needed on Nano
+#                         if the Nano only runs server_client.py).
+#                         Requires torch; install the JetPack-provided torch wheel first:
+#                         https://developer.download.nvidia.com/compute/redist/jp/v46/pytorch/
+#
+# * espeak-ng / aplay   — TTS audio (system packages, not pip):
+#                         sudo apt install -y espeak-ng alsa-utils ffmpeg
+#
+# * gtts                — Optional high-quality online TTS (needs network + ffmpeg).
+#
+# * pyttsx3             — Optional offline Python TTS fallback.
+# =============================================================================
+
+# --- Web framework (robot dashboard + inference server) ---
+flask>=2.0.0
+fastapi>=0.95.0
+uvicorn[standard]>=0.22.0
+
+# --- Computer vision ---
+# If JetPack already provides cv2, skip this line or comment it out.
+opencv-python>=4.5.0
+
+numpy>=1.19.0
+
+# --- YOLOv11 object detection (inference server, x99 machine) ---
+ultralytics>=8.0.0
+
+# --- IMU (MPU6050 via I2C) ---
+smbus2>=0.4.1
+
+# --- Jetson Nano GPIO ---
+Jetson.GPIO>=2.0.17
+
+# --- YAML configuration ---
+PyYAML>=5.4.0
+
+# --- TTS: optional gTTS (online, high quality) ---
+# Uncomment if you want Google TTS voices; also requires: sudo apt install ffmpeg
+# gtts>=2.3.0
+
+# --- TTS: optional pyttsx3 (offline Python fallback) ---
+# pyttsx3>=2.90
+#sudo apt install -y espeak-ng alsa-utils ffmpeg

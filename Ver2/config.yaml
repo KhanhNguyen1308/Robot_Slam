@@ -35,7 +35,7 @@ motor:
   wheel_diameter: 0.06984      # metres (69.84 mm outer diameter from CAD)
   wheel_base: 0.2845           # metres (284.5 mm track centre-to-centre)
   steps_per_rev: 200
-  microsteps: 16
+  microsteps: 8
   # Direct drive: motor shaft connects directly to 20-tooth sprocket (no intermediate gears)
   gear_ratio: 1.0              # = 1:1 (direct drive)
   max_linear_speed: 0.3        # m/s
@@ -79,6 +79,23 @@ object_camera:
   stream_width: 1280          # downscale before sending to server
   stream_height: 720
   jpeg_quality: 85            # JPEG quality for network transmission
+
+# --- MAX98357A stereo I2S audio (TTS) ------------------------------------
+# Two MAX98357A boards share BCLK/LRCLK/DIN on the Jetson Nano I2S bus.
+# Left amp : SD_MODE pulled HIGH (3.3 V via 100 K)  → left  channel
+# Right amp: SD_MODE pulled LOW  (GND via 100 K)    → right channel
+# See docs/MAX98357A_WIRING.md for full hardware setup.
+audio:
+  enabled: true
+  alsa_device: "plughw:tegrasndt210ref,0"   # 'plug' prefix enables auto rate conversion
+  sample_rate: 22050                         # Hz — espeak-ng native rate
+  channels: 2                               # stereo (drives both MAX98357A)
+  volume: 80                                # 0–100 %
+  language: "en"
+  espeak_voice: "en+m3"                     # espeak-ng voice variant (offline)
+  espeak_speed: 150                         # words per minute
+  use_gtts: false                           # true = use Google TTS (needs network)
+  cache_dir: "/tmp/robot_tts_cache"         # gTTS MP3/WAV cache
 
 # --- x99 inference server (192.168.2.10) ----------------------------------
 # The server runs server/inference_server.py with YOLOv11.

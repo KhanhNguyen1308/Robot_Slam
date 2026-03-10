@@ -29,6 +29,7 @@ from mpu6050_imu import MPU6050, ComplementaryFilter
 from imu_fusion import IMUVisualFusion, FusedSLAMWrapper
 from web_server import init_web_server, run_web_server
 from server_client import VisionServerClient
+from tts_audio import TTSAudio, Priority as TTSPriority
 
 # Configure logging
 logging.basicConfig(
@@ -65,6 +66,9 @@ class RobotSystem:
         # 4K object-detection camera + server client
         self.vision_client: VisionServerClient = None
 
+        # Text-to-speech via MAX98357A stereo I2S amplifier
+        self.tts: TTSAudio = None
+
         # Main processing thread
         self.processing_thread = None
 
@@ -79,7 +83,13 @@ class RobotSystem:
         """Initialize all robot components"""
         try:
             logger.info("=== Starting Robot System Setup ===")
-            
+
+            # 0. Initialize TTS audio (MAX98357A stereo I2S)
+            logger.info("0. Initializing TTS audio (MAX98357A)...")
+            self.tts = TTSAudio(self.config)
+            self.tts.start()
+            self.tts.speak("Robot system starting up.", TTSPriority.HIGH)
+
             # 1. Initialize Stereo Camera
             logger.info("1. Initializing stereo camera...")
             self.stereo_camera = StereoCamera(
@@ -97,6 +107,7 @@ class RobotSystem:
             
             if not self.stereo_camera.init_cameras():
                 logger.error("Failed to initialize cameras")
+                self.tts.speak_critical("Camera initialization failed.")
                 return False
             
             # Verify calibration was loaded
@@ -214,6 +225,7 @@ class RobotSystem:
             
             if not self.motor_controller.connect():
                 logger.error("Failed to initialize motor controller")
+                self.tts.speak_critical("Motor controller initialization failed.")
                 return False
             
             # 5. Initialize Obstacle Detector
@@ -288,6 +300,8 @@ class RobotSystem:
                 logger.info("8. Vision server disabled (vision_server.enabled=false)")
 
             logger.info("=== Robot System Setup Complete ===")
+            self.tts.speak("All systems ready. Beginning autonomous mapping.",
+                           TTSPriority.HIGH)
             return True
             
         except Exception as e:
@@ -342,6 +356,7 @@ class RobotSystem:
                         # Log critical obstacles
                         if obstacle_result and obstacle_result['action']['severity'] == 'critical':
                             logger.warning(f"CRITICAL OBSTACLE: {obstacle_result['action']['message']}")
+                            self.tts.speak_critical("Obstacle detected. Stopping.")
                     
                     # Update mapper with disparity map
                     if disparity is not None and pose is not None:
@@ -379,7 +394,19 @@ class RobotSystem:
                             logger.info(f"Semantic map: {summary}")
                         if self.vision_client:
                             logger.info(f"Vision client: {self.vision_client.get_stats()}")
-                
+
+                        # Announce mapping coverage milestones
+                        if frame_count % 100 == 0 and self.autonomous_mapper:
+                            stats = self.autonomous_mapper.get_stats()
+                            coverage = stats.get('coverage_percent', 0.0)
+                            for milestone in (25, 50, 75, 90):
+                                attr = f'_announced_{milestone}pct'
+                                if coverage >= milestone and not getattr(self, attr, False):
+                                    setattr(self, attr, True)
+                                    self.tts.speak_event(
+                                        f"Mapping {milestone} percent complete."
+                                    )
+
                 time.sleep(0.01)  # ~100 Hz max
                 
             except Exception as e:
@@ -412,7 +439,11 @@ class RobotSystem:
     def stop(self):
         """Stop all robot systems"""
         logger.info("Stopping robot system...")
-        
+        if self.tts:
+            self.tts.speak("Robot shutting down.", TTSPriority.HIGH)
+            # Brief pause so the utterance can finish before motors stop
+            time.sleep(1.5)
+
         self.running = False
         
         # Stop autonomous exploration
@@ -450,7 +481,11 @@ class RobotSystem:
         # Wait for processing thread
         if self.processing_thread:
             self.processing_thread.join(timeout=2.0)
-        
+
+        # Stop TTS last so any final messages can complete
+        if self.tts:
+            self.tts.stop()
+
         logger.info("Robot system stopped")
     
     def cleanup(self):

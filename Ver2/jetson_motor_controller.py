@@ -74,7 +74,7 @@ class A4988StepperMotor:
         
         if microsteps not in ms_config:
             logger.warning(f"Invalid microstep value {microsteps}, using 16")
-            microsteps = 16
+            microsteps = 8
         
         ms1, ms2, ms3 = ms_config[microsteps]
         GPIO.output(self.ms1_pin, GPIO.HIGH if ms1 else GPIO.LOW)
