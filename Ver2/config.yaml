@@ -14,7 +14,7 @@ camera:
   manual_gain: 55
 
 slam:
-  use_orbslam3: false          # set true only when C++ bindings are built
+  use_orbslam3: true          # set true only when C++ bindings are built
   orb_slam_path: /home/jetson/ORB_SLAM3
   use_viewer: false
 

@@ -246,6 +246,10 @@ Viewer.ViewpointF: 500
             theta = np.arctan2(R[2, 0], R[0, 0])
             
             return x, y, theta
+
+    def get_2d_pose(self) -> Optional[Tuple[float, float, float]]:
+        """Alias for get_pose() for compatibility with SLAM interface"""
+        return self.get_pose()
     
     def get_map_points(self) -> List[np.ndarray]:
         """Get current map points"""

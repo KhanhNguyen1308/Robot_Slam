@@ -17,6 +17,21 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+
+class _NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that converts numpy scalars/arrays to native Python types."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
+app.json_encoder = _NumpyEncoder
+
 # -------------------------------------------------------------------------
 # API token auth
 # Token is read from the ROBOT_API_TOKEN env var (set on the Jetson before
