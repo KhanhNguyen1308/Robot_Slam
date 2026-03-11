@@ -72,7 +72,7 @@ web_server:
 # Used for wide-angle object detection via the x99 server.
 # Set capture_fps lower (10-15) at 4K to stay within USB 3.0 bandwidth.
 object_camera:
-  device_id: 2                # /dev/video2
+  device_id: 0                # /dev/video0
   capture_width: 3840         # native 4K
   capture_height: 2160
   capture_fps: 15
